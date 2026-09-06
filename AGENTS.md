@@ -28,6 +28,9 @@ optionally `fzf`.
   but does carry ANSI colour — fzf gets `--ansi`, the plain picker prints it raw.
   Colour is off unless stdout is a tty; fzf's reload binding runs `rows` down a pipe,
   so it passes `GROVE_ANSI=1` to opt back in. `NO_COLOR` and `TERM=dumb` disable it.
+- The picker's last row is synthetic: `new_row` carries `%new%` in its path field and
+  every picker resolves that to `new_worktree`. `--_rows` appends it (fzf reload must
+  keep it); `grove -l` calls `rows` directly and never shows it.
 
 ## Gotchas found the hard way
 

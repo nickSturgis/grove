@@ -162,7 +162,19 @@ rows() {
       "$(describe "$p")" "$session" "$p"
   done < <(grove_worktrees) | sort -t$'\t' -k1,1n | cut -f2-
 }
-[ "${1:-}" = "--_rows" ] && { rows; exit 0; }
+
+# The picker's last row: a synthetic entry that creates a worktree. It carries
+# the %new% sentinel in its path field, so every picker path — fzf, cursor,
+# numbered — recognises it by the same test. `-l` calls rows() directly and so
+# never sees it; --_rows does, to survive fzf's reload binding.
+NEW_SENTINEL='%new%'
+new_row() {
+  local slug
+  printf -v slug '%-10s' '+ new'
+  printf '%s%s%s  %screate a worktree%s\t%s\t%s\n' \
+    "$c_bold$c_cyn" "$slug" "$c_rst" "$c_dim" "$c_rst" '-' "$NEW_SENTINEL"
+}
+[ "${1:-}" = "--_rows" ] && { rows; new_row; exit 0; }
 
 # --- create a fresh worktree, race-safe against parallel shells --------------
 # Keep an in-repo worktree out of git's way. info/exclude is local, so we never
@@ -269,6 +281,10 @@ fi
 
 mapfile -t ROWS < <(rows)
 [ "${#ROWS[@]}" -eq 0 ] && { launch "$(new_worktree)" "$@"; exit 0; }
+ROWS+=("$(new_row)")
+
+# a picked row's path, with the synthetic row turned into a real worktree
+resolve() { if [ "$1" = "$NEW_SENTINEL" ]; then new_worktree; else printf '%s\n' "$1"; fi; }
 
 # --- picker ------------------------------------------------------------------
 use_fzf=0
@@ -281,7 +297,8 @@ if [ "$use_fzf" = 1 ]; then
   out=$(printf '%s\n' "${ROWS[@]}" | fzf \
     --ansi --delimiter='\t' --with-nth=1 --height=70% --reverse --no-multi \
     --header=$'enter open   ctrl-x kill   ctrl-n new worktree   esc quit\n' \
-    --preview='{ tmux capture-pane -pe -t ={2}: 2>/dev/null || echo "(not running)"; } | tail -40' \
+    --preview='if [ {3} = %new% ]; then echo "make a fresh worktree and open it"; else
+                 { tmux capture-pane -pe -t ={2}: 2>/dev/null || echo "(not running)"; } | tail -40; fi' \
     --preview-window='right,58%,border-left' \
     --bind="ctrl-x:execute-silent(tmux kill-session -t ={2} 2>/dev/null)+reload(GROVE_ANSI=1 $(printf '%q' "$self") --_rows)" \
     --expect=ctrl-n) || true
@@ -289,7 +306,7 @@ if [ "$use_fzf" = 1 ]; then
   sel=$(printf '%s' "$out" | sed -n 2p)
   [ "$key" = ctrl-n ] && { launch "$(new_worktree)" "$@"; exit 0; }
   [ -z "$sel" ] && exit 0
-  launch "$(printf '%s' "$sel" | cut -f3)" "$@"
+  launch "$(resolve "$(printf '%s' "$sel" | cut -f3)")" "$@"
   exit 0
 fi
 
@@ -358,7 +375,7 @@ if [ -t 2 ] && [ "${TERM:-dumb}" != dumb ] && [ -r /dev/tty ]; then
   case "$PICKED" in
     '')  exit 0 ;;
     new) launch "$(new_worktree)" "$@" ;;
-    *)   launch "$(printf '%s' "${ROWS[$PICKED]}" | cut -f3)" "$@" ;;
+    *)   launch "$(resolve "$(printf '%s' "${ROWS[$PICKED]}" | cut -f3)")" "$@" ;;
   esac
   exit 0
 fi
@@ -367,7 +384,7 @@ fi
 for i in "${!DISP[@]}"; do
   printf '  %d) %s\n' "$((i + 1))" "${DISP[$i]}" >&2
 done
-printf '  n) new worktree\n  q) quit\n\n  > ' >&2
+printf '  q) quit\n\n  > ' >&2
 read -r choice </dev/tty
 case "$choice" in
   n|N)    launch "$(new_worktree)" "$@" ;;
@@ -375,6 +392,6 @@ case "$choice" in
   *)
     [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#ROWS[@]}" ] \
       || die "invalid choice: $choice"
-    launch "$(printf '%s' "${ROWS[$((choice - 1))]}" | cut -f3)" "$@"
+    launch "$(resolve "$(printf '%s' "${ROWS[$((choice - 1))]}" | cut -f3)")" "$@"
     ;;
 esac
