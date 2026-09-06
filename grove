@@ -17,6 +17,7 @@ set -euo pipefail
 GROVE_ROOT="${GROVE_ROOT:-}"                  # set: old $GROVE_ROOT/<repo>/<slug>
 GROVE_CLAUDE="${GROVE_CLAUDE:-claude}"
 GROVE_PICKER="${GROVE_PICKER:-auto}"          # auto | fzf | plain
+# NO_COLOR or TERM=dumb drop the colour; GROVE_ANSI=1 forces it down a pipe.
 
 self=$(readlink -f "$0")
 die() { printf 'grove: %s\n' "$*" >&2; exit 1; }
@@ -84,6 +85,28 @@ done < <(tmux list-sessions -F '#{session_name}|#{session_attached}|#{@grove_sta
 alive()    { [ -n "${S_ATTACHED[$1]+x}" ]; }
 attached() { [ "${S_ATTACHED[$1]:-0}" != 0 ]; }
 
+# --- colour -----------------------------------------------------------------
+# fzf is given --ansi; the plain picker prints these raw. rows() re-runs in a
+# subshell for fzf's reload binding, where stdout is a pipe rather than a tty —
+# that binding passes GROVE_ANSI=1 to opt back in.
+if [ -n "${NO_COLOR:-}" ] || [ "${TERM:-dumb}" = dumb ] \
+   || { [ -z "${GROVE_ANSI:-}" ] && [ ! -t 1 ]; }; then
+  c_rst='' c_dim='' c_bold='' c_red='' c_grn='' c_ylw='' c_cyn=''
+else
+  c_rst=$'\033[0m'  c_dim=$'\033[2m'  c_bold=$'\033[1m'
+  c_red=$'\033[31m' c_grn=$'\033[32m' c_ylw=$'\033[33m' c_cyn=$'\033[36m'
+fi
+
+rank_color() {  # rank -> the colour its status label wears
+  case "$1" in
+    0) printf '%s' "$c_bold$c_red" ;;   # needs you
+    1) printf '%s' "$c_grn" ;;          # done
+    2) printf '%s' "$c_cyn" ;;          # live
+    4) printf '%s' "$c_ylw" ;;          # working
+    *) printf '%s' "$c_dim" ;;          # free
+  esac
+}
+
 # rank: lower sorts first. Sessions needing you float to the top.
 status_of() {  # session -> "rank|label"
   local s=$1
@@ -120,7 +143,11 @@ describe() {
   local p="$1" br dirty
   br=$(git -C "$p" symbolic-ref --short HEAD 2>/dev/null || echo detached)
   dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l)
-  [ "$dirty" -gt 0 ] && printf '%s ~%s' "$br" "$dirty" || printf '%s' "$br"
+  if [ "$dirty" -gt 0 ]; then
+    printf '%s%s%s %s~%s%s' "$c_dim" "$br" "$c_rst" "$c_ylw" "$dirty" "$c_rst"
+  else
+    printf '%s%s%s' "$c_dim" "$br" "$c_rst"
+  fi
 }
 
 # --- machine-readable rows: display <TAB> session <TAB> path ------------------
@@ -130,8 +157,9 @@ rows() {
     [ -n "$p" ] || continue
     slug=$(basename "$p"); session=$(session_for "$slug")
     IFS='|' read -r rank label <<<"$(status_of "$session")"
-    printf '%s\t%-10s  %-20s  %s\t%s\t%s\n' \
-      "$rank" "$slug" "$label" "$(describe "$p")" "$session" "$p"
+    printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\n' \
+      "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
+      "$(describe "$p")" "$session" "$p"
   done < <(grove_worktrees) | sort -t$'\t' -k1,1n | cut -f2-
 }
 [ "${1:-}" = "--_rows" ] && { rows; exit 0; }
@@ -251,11 +279,11 @@ esac
 
 if [ "$use_fzf" = 1 ]; then
   out=$(printf '%s\n' "${ROWS[@]}" | fzf \
-    --delimiter='\t' --with-nth=1 --height=70% --reverse --no-multi \
+    --ansi --delimiter='\t' --with-nth=1 --height=70% --reverse --no-multi \
     --header=$'enter open   ctrl-x kill   ctrl-n new worktree   esc quit\n' \
     --preview='{ tmux capture-pane -pe -t ={2}: 2>/dev/null || echo "(not running)"; } | tail -40' \
     --preview-window='right,58%,border-left' \
-    --bind="ctrl-x:execute-silent(tmux kill-session -t ={2} 2>/dev/null)+reload($(printf '%q' "$self") --_rows)" \
+    --bind="ctrl-x:execute-silent(tmux kill-session -t ={2} 2>/dev/null)+reload(GROVE_ANSI=1 $(printf '%q' "$self") --_rows)" \
     --expect=ctrl-n) || true
   key=$(printf '%s' "$out" | head -1)
   sel=$(printf '%s' "$out" | sed -n 2p)
@@ -265,9 +293,79 @@ if [ "$use_fzf" = 1 ]; then
   exit 0
 fi
 
-printf '\n  %s — pick a worktree\n\n' "$repo" >&2
-for i in "${!ROWS[@]}"; do
-  printf '  %d) %s\n' "$((i + 1))" "$(printf '%s' "${ROWS[$i]}" | cut -f1)" >&2
+# --- plain picker: an arrow-key cursor, no deps ------------------------------
+# bash's own `read -n1` switches the tty to non-canonical mode and restores it,
+# so there is no stty state to save here — only the hidden cursor, which the
+# traps put back on every exit path including ^C. The current row is marked with
+# a pointer rather than reverse video: each row already carries its own colour
+# resets, which would cancel a reverse attribute part-way along the line.
+plain_pick() {   # sets PICKED to a row index, to 'new', or to '' for quit
+  local n=${#DISP[@]} i cur=0 k k2 k3 first=1
+  PICKED=''
+  show_cursor() { printf '\033[?25h' >&2; }
+  exec 3</dev/tty
+  trap 'show_cursor; exit 130' INT TERM
+  trap 'show_cursor; exec 3<&-' RETURN
+  trap show_cursor EXIT
+  printf '\033[?25l' >&2
+
+  while :; do
+    # after the first pass, rewind over exactly the rows we drew
+    [ "$first" = 1 ] && first=0 || printf '\033[%dA' "$n" >&2
+    for i in "${!DISP[@]}"; do
+      if [ "$i" = "$cur" ]; then
+        printf '\033[2K  %s\xe2\x9d\xaf%s %s\n' "$c_bold$c_cyn" "$c_rst" "${DISP[$i]}" >&2
+      else
+        printf '\033[2K    %s\n' "${DISP[$i]}" >&2
+      fi
+    done
+
+    IFS= read -rsn1 k <&3 || return 0
+    case "$k" in
+      '')          PICKED=$cur; return 0 ;;   # enter — read strips the newline
+      $'\033')
+        # a lone ESC quits; ESC [ or ESC O starts a cursor key
+        read -rsn1 -t 0.05 k2 <&3 || return 0
+        case "$k2" in '['|O) ;; *) continue ;; esac
+        read -rsn1 -t 0.05 k3 <&3 || continue
+        case "$k3" in
+          A) cur=$(( (cur - 1 + n) % n )) ;;
+          B) cur=$(( (cur + 1) % n )) ;;
+          H) cur=0 ;;
+          F) cur=$(( n - 1 )) ;;
+        esac ;;
+      k|p)         cur=$(( (cur - 1 + n) % n )) ;;
+      j)           cur=$(( (cur + 1) % n )) ;;
+      g)           cur=0 ;;
+      G)           cur=$(( n - 1 )) ;;
+      [1-9])       [ "$k" -le "$n" ] && cur=$(( k - 1 )) ;;
+      n|N)         PICKED=new; return 0 ;;
+      q|Q|$'\003') return 0 ;;
+    esac
+  done
+}
+
+DISP=()
+for r in "${ROWS[@]}"; do DISP+=("${r%%$'\t'*}"); done
+
+printf '\n  %s%s%s \xe2\x80\x94 pick a worktree\n' "$c_bold" "$repo" "$c_rst" >&2
+printf '  %s\xe2\x86\x91\xe2\x86\x93/jk move   enter open   n new   q quit%s\n\n' \
+  "$c_dim" "$c_rst" >&2
+
+if [ -t 2 ] && [ "${TERM:-dumb}" != dumb ] && [ -r /dev/tty ]; then
+  plain_pick
+  printf '\n' >&2
+  case "$PICKED" in
+    '')  exit 0 ;;
+    new) launch "$(new_worktree)" "$@" ;;
+    *)   launch "$(printf '%s' "${ROWS[$PICKED]}" | cut -f3)" "$@" ;;
+  esac
+  exit 0
+fi
+
+# No usable terminal — piped stderr, or TERM=dumb. Fall back to a numbered read.
+for i in "${!DISP[@]}"; do
+  printf '  %d) %s\n' "$((i + 1))" "${DISP[$i]}" >&2
 done
 printf '  n) new worktree\n  q) quit\n\n  > ' >&2
 read -r choice </dev/tty

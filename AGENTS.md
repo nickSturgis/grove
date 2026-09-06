@@ -24,7 +24,10 @@ optionally `fzf`.
   commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
   rows (`grove --_rows`, consumed by the fzf reload binding).
-- Rows are tab-delimited `display\tsession\tpath`. `display` must not contain tabs.
+- Rows are tab-delimited `display\tsession\tpath`. `display` must not contain tabs,
+  but does carry ANSI colour — fzf gets `--ansi`, the plain picker prints it raw.
+  Colour is off unless stdout is a tty; fzf's reload binding runs `rows` down a pipe,
+  so it passes `GROVE_ANSI=1` to opt back in. `NO_COLOR` and `TERM=dumb` disable it.
 
 ## Gotchas found the hard way
 
@@ -35,6 +38,12 @@ optionally `fzf`.
   `--exclude=refs/heads/grove/wt1`. And `--all` silently includes every
   worktree's HEAD, which would always protect the branch you're testing.
 - `a | b || c` binds `||` to `b`. Wrap the fallback: `{ a || c; } | b`.
+- `printf '%-10s'` counts ANSI escape bytes as width, so pad the plain string and
+  wrap the padded result in colour — never colour first.
+- tmux `send-keys`/`capture-pane` take a *pane* target, so `-t =<session>` fails with
+  "can't find pane" where `kill-session` accepts it. The trailing colon is required.
+- The plain picker marks the current row with a pointer, not reverse video: each row
+  carries its own colour resets, which would cancel a reverse attribute mid-line.
 
 ## Testing
 
@@ -53,7 +62,11 @@ Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
 `printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
 
 Check both picker paths (`GROVE_PICKER=fzf` and `GROVE_PICKER=plain`) — they are
-separate code paths and only one gets exercised on any given machine.
+separate code paths and only one gets exercised on any given machine. Both are now
+cursor UIs, so driving them takes a real terminal: run grove in a detached tmux
+session, `send-keys -t =<session>:` the arrows, then `capture-pane` to see the frame.
+The plain picker needs stderr to be a tty — redirect it and it falls back to the
+numbered prompt, which is also the `TERM=dumb` path.
 
 
 ## Keeping these files navigable
