@@ -9,12 +9,12 @@
 #   grove --hooks     print the Claude Code hook config for live status
 #   grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 #
-# Worktrees live outside the repo, under $GROVE_ROOT
-# (default ~/.grove/<repo>/<slug>), so they never pollute your checkout.
+# Worktrees live at <repo>/.claude/worktrees/<slug>, where Claude Code puts its
+# own, so /resume finds their sessions. $GROVE_ROOT restores the old location.
 
 set -euo pipefail
 
-GROVE_ROOT="${GROVE_ROOT:-$HOME/.grove}"
+GROVE_ROOT="${GROVE_ROOT:-}"                  # set: old $GROVE_ROOT/<repo>/<slug>
 GROVE_CLAUDE="${GROVE_CLAUDE:-claude}"
 GROVE_PICKER="${GROVE_PICKER:-auto}"          # auto | fzf | plain
 
@@ -67,7 +67,9 @@ git_common=$(cd "$git_common" && pwd -P)
 main_root=$(dirname "$git_common")
 repo=$(basename "$main_root")
 repo_slug=$(sanitize "$repo")
-wt_base="$GROVE_ROOT/$repo_slug"
+if [ -n "$GROVE_ROOT" ]; then wt_base="$GROVE_ROOT/$repo_slug"
+else                          wt_base="$main_root/.claude/worktrees"
+fi
 
 session_for() { printf 'grove-%s-%s' "$repo_slug" "$(sanitize "$1")"; }
 
@@ -95,12 +97,23 @@ status_of() {  # session -> "rank|label"
   esac
 }
 
+# What makes a worktree grove's is its branch, not its path: that ignores the
+# worktrees `claude -w` now creates alongside ours, and keeps finding the ones
+# left over from the old $GROVE_ROOT layout. substr, not $2 — paths hold spaces.
 grove_worktrees() {
   git -C "$main_root" worktree list --porcelain 2>/dev/null \
-    | sed -n 's/^worktree //p' \
+    | awk '/^worktree /{p=substr($0,10)} /^branch refs\/heads\/grove\//{print p}' \
     | while IFS= read -r p; do
-        case "$p" in "$wt_base"/*) [ -d "$p" ] && printf '%s\n' "$p" ;; esac
+        if [ -d "$p" ]; then printf '%s\n' "$p"; fi
       done
+}
+
+path_for_slug() {
+  local s="$1" p
+  while IFS= read -r p; do
+    if [ "$(basename "$p")" = "$s" ]; then printf '%s\n' "$p"; return 0; fi
+  done < <(grove_worktrees)
+  return 0
 }
 
 describe() {
@@ -124,7 +137,18 @@ rows() {
 [ "${1:-}" = "--_rows" ] && { rows; exit 0; }
 
 # --- create a fresh worktree, race-safe against parallel shells --------------
+# Keep an in-repo worktree out of git's way. info/exclude is local, so we never
+# touch a tracked .gitignore; the pattern matches the one Claude Code writes.
+ensure_ignored() {
+  case "$wt_base" in "$main_root"/*) ;; *) return ;; esac
+  local ex="$git_common/info/exclude"
+  mkdir -p "$git_common/info"
+  grep -qE '^\*\*/\.claude/worktrees/$|^/?\.claude/worktrees/$' "$ex" 2>/dev/null \
+    || printf '**/.claude/worktrees/\n' >> "$ex"
+}
+
 new_worktree() {
+  ensure_ignored
   mkdir -p "$wt_base"
   local n=1 slug path
   exec 9>"$wt_base/.lock"
@@ -166,8 +190,8 @@ cmd_kill() {
   local slug="${1:-}" path session dirty orphans risk="" ans
   [ -n "$slug" ] || die "usage: grove -k <slug>"
   case "$slug" in */*|''|.|..) die "invalid slug: $slug" ;; esac
-  path="$wt_base/$slug"; session=$(session_for "$slug")
-  [ -d "$path" ] || die "no such worktree: $slug"
+  path=$(path_for_slug "$slug"); session=$(session_for "$slug")
+  [ -n "$path" ] || die "no such worktree: $slug"
 
   dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
   orphans=$(orphan_count "$slug")
@@ -205,10 +229,12 @@ while [ $# -gt 0 ]; do
 done
 
 # already inside a grove worktree? go straight to its session
-here=$(pwd -P)
-if [ "$force_new" = 0 ] && [ "$here" != "${here#"$wt_base"/}" ]; then
-  launch "$wt_base/$(printf '%s' "${here#"$wt_base"/}" | cut -d/ -f1)" "$@"
-  exit 0
+here=$(git rev-parse --show-toplevel 2>/dev/null) && here=$(cd "$here" && pwd -P) \
+  || here=$(pwd -P)
+if [ "$force_new" = 0 ]; then
+  while IFS= read -r p; do
+    if [ "$p" = "$here" ]; then launch "$p" "$@"; exit 0; fi
+  done < <(grove_worktrees)
 fi
 
 [ "$force_new" = 1 ] && { launch "$(new_worktree)" "$@"; exit 0; }

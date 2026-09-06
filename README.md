@@ -17,8 +17,13 @@ grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 
 Each worktree gets its own branch (`grove/<slug>`) and its own tmux session
 (`grove-<repo>-<slug>`), so parallel Claude sessions never touch each other's
-files. Worktrees live under `$GROVE_ROOT` (default `~/.grove/<repo>/<slug>`),
-outside your checkout.
+files. Worktrees live at `<repo>/.claude/worktrees/<slug>` — the same place
+Claude Code puts the ones `claude -w` makes — so `/resume` from the main
+checkout finds their sessions under `Ctrl+W`. They're added to
+`.git/info/exclude`, so they never show up in `git status`.
+
+grove only ever lists or removes worktrees on a `grove/<slug>` branch, so
+worktrees you made another way sit in the same directory untouched.
 
 `grove -k` refuses to silently discard work: it warns and shows the commits if
 the branch holds anything not merged anywhere else.
@@ -48,7 +53,7 @@ it's installed, otherwise a numbered prompt.
 
 | Env | Default | |
 |---|---|---|
-| `GROVE_ROOT` | `~/.grove` | where worktrees go |
+| `GROVE_ROOT` | unset | set it to put worktrees at `$GROVE_ROOT/<repo>/<slug>` instead |
 | `GROVE_CLAUDE` | `claude` | the binary to launch |
 | `GROVE_PICKER` | `auto` | `auto`, `fzf`, or `plain` |
 

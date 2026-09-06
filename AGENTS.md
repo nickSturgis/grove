@@ -12,8 +12,14 @@ optionally `fzf`.
   let it fail — hooks that error are user-visible noise.
 - `grove -h` prints lines 2-13 of the file itself. Edits to the header comment
   must preserve that line range.
-- Worktrees go under `$GROVE_ROOT`, never inside the repo. Branches are
-  `grove/<slug>`, sessions are `grove-<repo>-<slug>`.
+- Worktrees go at `<repo>/.claude/worktrees/<slug>` — Claude Code's own
+  location, so `/resume` finds their sessions. Setting `$GROVE_ROOT` restores
+  the old out-of-repo layout. Sessions are `grove-<repo>-<slug>`.
+- The **`grove/<slug>` branch prefix, not the path, is what marks a worktree as
+  grove's.** That directory is shared with `claude -w` worktrees (branch
+  `worktree-<name>`), which grove must never list or delete, and the branch test
+  also keeps finding worktrees left over from the old `$GROVE_ROOT` layout. A
+  grove worktree on a detached HEAD drops out of the listing; that's accepted.
 - Never destroy work without confirming: `-k` checks both uncommitted files and
   commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
@@ -35,8 +41,12 @@ optionally `fzf`.
 No test suite. Verify by hand in a scratch repo:
 
 ```bash
-export GROVE_ROOT=/tmp/grovetest GROVE_CLAUDE=/bin/true
+export GROVE_CLAUDE=/bin/true
 cd /tmp/scratch-repo && grove -l && grove -n && grove -k wt1
+git status --porcelain          # must be empty: the worktree is excluded
+
+# and the override path, which is a separate branch of the base-dir logic
+GROVE_ROOT=/tmp/grovetest grove -n && grove -l && grove -k wt2
 ```
 
 Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
