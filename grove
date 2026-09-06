@@ -38,22 +38,26 @@ if [ "${1:-}" = "--state" ]; then
 fi
 
 if [ "${1:-}" = "--hooks" ]; then
+  # $self is the resolved real path. Run from inside a worktree that is the
+  # worktree's own copy, which `grove -k` deletes out from under the hook, so
+  # prefer the name on $PATH — it outlives any one worktree.
+  hook_self=$(command -v grove 2>/dev/null) || hook_self=$self
   cat <<EOF
 Merge into ~/.claude/settings.json:
 
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "$self --state working" } ] }
+      { "hooks": [ { "type": "command", "command": "$hook_self --state working" } ] }
     ],
     "Notification": [
-      { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "$self --state waiting" } ] }
+      { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "$hook_self --state waiting" } ] }
     ],
     "PreToolUse": [
-      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "$self --state waiting" } ] }
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "$hook_self --state waiting" } ] }
     ],
     "Stop": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "$self --state idle" } ] }
+      { "hooks": [ { "type": "command", "command": "$hook_self --state idle" } ] }
     ]
   }
 }
@@ -325,7 +329,12 @@ launch() {
     cmd=$(printf '%q' "$GROVE_CLAUDE")
     for a in "$@"; do cmd="$cmd $(printf '%q' "$a")"; done
     cmd="$cmd; exec ${SHELL:-/bin/bash}"          # survive /exit
-    tmux new-session -d -s "$session" -c "$path" "$cmd"
+    # GROVE_SLUG/GROVE_MAIN_ROOT tell whatever runs in here that it is a grove
+    # worktree, and where the main checkout is. The branch name is the weaker
+    # fallback tell — it misses a detached HEAD. Only a session we create gets
+    # them; an existing one is attached as it stands. tmux -e needs 3.2.
+    tmux new-session -d -s "$session" -c "$path" \
+      -e GROVE_SLUG="$slug" -e GROVE_MAIN_ROOT="$main_root" "$cmd"
   fi
   attach "$session"
 }
