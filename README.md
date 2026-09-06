@@ -46,8 +46,8 @@ sort by what needs you:
   wt2         working               grove/wt2 ~7
 ```
 
-Needs `git` and `tmux`; uses `fzf` for the picker (with a live pane preview) if
-it's installed, otherwise a numbered prompt.
+Needs `git` and `tmux` (>= 3.2, for `new-session -e`); uses `fzf` for the picker
+(with a live pane preview) if it's installed, otherwise a numbered prompt.
 
 ## Config
 
@@ -56,6 +56,12 @@ it's installed, otherwise a numbered prompt.
 | `GROVE_ROOT` | unset | set it to put worktrees at `$GROVE_ROOT/<repo>/<slug>` instead |
 | `GROVE_CLAUDE` | `claude` | the binary to launch |
 | `GROVE_PICKER` | `auto` | `auto`, `fzf`, or `plain` |
+
+Into each session it creates, grove exports `GROVE_SLUG` and `GROVE_MAIN_ROOT`
+(the main checkout's path) — so what runs inside knows it is in a grove worktree
+without inferring it from the branch name, which a detached HEAD would hide.
+Attaching to a session that already exists changes nothing, so a session
+predating this gets neither.
 
 ## Credit
 

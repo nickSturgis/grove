@@ -122,4 +122,8 @@ method for doing that — and for auditing the whole trail — is the `breadcrum
 ## Elsewhere
 
 - **Issues are Gitea issues** on `gitea.glowlab.cc` (`glowlab/grove`), driven via
-  `mcp__gitea__*` — there is no `tea` CLI. Cite them inline as `Gitea **#N**`. 
+  `mcp__gitea__*` — there is no `tea` CLI. Cite them inline as `Gitea **#N**`.
+- **The workflow that lands this repo's work** — branching, committing, merging
+  to `main` — is the `git-workflow@glow` skill
+  (`~/glow-marketplace/plugins/git-workflow/skills/git-workflow/SKILL.md`).
+  Canonical there; never restated here. 
