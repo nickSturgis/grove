@@ -10,8 +10,11 @@ optionally `fzf`.
 - `grove --state <s>` is a hot path (runs as a Claude Code hook on every prompt).
   Keep it at the top of the file, before any `git`/`tmux` discovery, and never
   let it fail — hooks that error are user-visible noise.
-- `grove -h` prints lines 2-13 of the file itself. Edits to the header comment
-  must preserve that line range.
+- `grove -h` reprints the file's own leading comment block — every `#` line from
+  line 2 until the first line that isn't one. Keep that block the whole help text.
+- grove runs **outside a git repo too**: there it has no worktrees, only the
+  sessions tab. Anything needing `$main_root`/`$wt_base` must sit behind
+  `need_repo` or an `$in_repo` test.
 - Worktrees go at `<repo>/.claude/worktrees/<slug>` — Claude Code's own
   location, so `/resume` finds their sessions. Setting `$GROVE_ROOT` restores
   the old out-of-repo layout. Sessions are `grove-<repo>-<slug>`.
@@ -24,13 +27,27 @@ optionally `fzf`.
   commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
   rows (`grove --_rows`, consumed by the fzf reload binding).
-- Rows are tab-delimited `display\tsession\tpath`. `display` must not contain tabs,
+- Rows are tab-delimited `display\tsession\tpath\ttab`. `display` must not contain tabs,
   but does carry ANSI colour — fzf gets `--ansi`, the plain picker prints it raw.
   Colour is off unless stdout is a tty; fzf's reload binding runs `rows` down a pipe,
   so it passes `GROVE_ANSI=1` to opt back in. `NO_COLOR` and `TERM=dumb` disable it.
 - The picker's last row is synthetic: `new_row` carries `%new%` in its path field and
   every picker resolves that to `new_worktree`. `--_rows` appends it (fzf reload must
   keep it); `grove -l` calls `rows` directly and never shows it.
+- Two tabs — `rows` (this repo's worktrees) and `session_rows` (every live
+  `grove-*` tmux session, any repo). Because there are exactly two, ← and → are
+  **absolute, not a toggle**: ← is always worktrees, → always sessions, so no
+  picker has to track which tab it is on. The 4th row field carries the tab name
+  purely so the kill key can reload the tab you were on (`--_rows {4}`).
+- `--_rows` is fzf's alone, and prints the tab bar as its **first line**, pinned
+  with `--header-lines=1`. The plain picker and `-l`/`-s` call `rows`/
+  `session_rows` directly and never see it.
+- `open_row` is how every picker acts on a choice: `%new%` makes a worktree, a
+  live session is attached **by name** (a sessions-tab row belongs to another
+  repo, where `launch` would compute the wrong session name), else `launch`.
+- Killing a session is not destroying work — the worktree stays — so the kill
+  key needs no confirmation. It routes through `grove --_kill`, which refuses
+  any name that isn't `grove-*` and refuses the session it is running in.
 
 ## Gotchas found the hard way
 
@@ -47,6 +64,13 @@ optionally `fzf`.
   "can't find pane" where `kill-session` accepts it. The trailing colon is required.
 - The plain picker marks the current row with a pointer, not reverse video: each row
   carries its own colour resets, which would cancel a reverse attribute mid-line.
+- fzf `change-header` needs 0.42; Debian still ships **0.38**, which dies with
+  "unknown action" on an unknown binding — taking the whole picker with it. That
+  is why the tab bar rides in on `--header-lines`. Check any new binding against
+  0.38 before using it.
+- The plain picker's frame changes height when you switch tabs, so it rewinds by
+  the count it actually drew (`FRAME`) and blanks the surplus lines — rewinding
+  by row count alone leaves the old tab's rows stranded below.
 
 ## Testing
 
@@ -60,6 +84,12 @@ git status --porcelain          # must be empty: the worktree is excluded
 # and the override path, which is a separate branch of the base-dir logic
 GROVE_ROOT=/tmp/grovetest grove -n && grove -l && grove -k wt2
 ```
+
+The sessions tab needs **two** scratch repos, or it never proves it resolves the
+right session for a row outside the current one. `grove -s` from `~` is the
+no-repo path. Force the interesting states by hand — `tmux set-option -t
+<session> @grove_state waiting`, and `git worktree remove --force` a live
+session's directory to get the `gone` row.
 
 Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
 `printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
