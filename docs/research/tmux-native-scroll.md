@@ -1,7 +1,8 @@
 # Making tmux feel like a normal terminal (mouse scroll)
 
 Research note. Measured on this machine, 2026-09-06: tmux **3.3a**, Claude Code
-**2.1.263**, VS Code integrated terminal, `TERM=xterm-256color`.
+**2.1.263**, code-server 1.118 in a browser tab (xterm.js), `TERM=xterm-256color`,
+driven from macOS.
 
 ## The answer
 
@@ -153,8 +154,9 @@ set -as terminal-features ',xterm-256color:RGB'        # truecolor
   tmux's built-in detection table.
 - **`set-clipboard on`** needs an `Ms` terminfo entry and a terminal that permits
   OSC 52. iTerm2 blocks it until Settings → General → Selection → *Applications in
-  terminal may access clipboard*. Use `external` instead of `on` to let tmux write
-  your terminal's clipboard but ignore apps writing tmux buffers.
+  terminal may access clipboard*; a browser terminal may refuse it outright, see
+  *OSC 52 does not survive Firefox* below. Use `external` instead of `on` to let
+  tmux write your terminal's clipboard but ignore apps writing tmux buffers.
 - **Wheel speed** is 5 lines/notch by default; most terminals do 3. To match:
   ```tmux
   bind -T copy-mode    WheelUpPane select-pane \; send -N3 -X scroll-up
@@ -174,17 +176,76 @@ set -as terminal-features ',xterm-256color:RGB'        # truecolor
 ## Text selection after `mouse on`
 
 With `mouse on`, tmux enables mouse reporting on the real terminal, so the
-emulator stops doing native click-and-drag selection. **Hold Shift** to suppress
-reporting and get it back — the xterm convention, honoured by VS Code's terminal,
+emulator stops doing native click-and-drag selection. The usual advice is **hold
+Shift** to suppress reporting and get it back — the xterm convention, honoured by
 kitty, Alacritty, WezTerm, Ghostty, GNOME Terminal, Konsole, foot, Windows
-Terminal. (iTerm2 uses Option; Terminal.app uses Fn.)
+Terminal.
 
-The catch: a Shift-drag selects across the whole terminal window and knows
-nothing about panes, so a split layout yields interleaved garbage and it grabs
-the status line too. For single-pane selection tmux's own copy-mode drag is
-better — and with `set-clipboard on` it reaches the system clipboard. If you want
-a selection to survive without yanking you back to the bottom, replace the default
-`copy-pipe-and-cancel`:
+**That advice is platform-dependent, and on a Mac it is simply wrong.** xterm.js —
+which is what VS Code's terminal and code-server actually are — branches on the
+*client* platform, not the remote's:
+
+```js
+// @xterm/xterm, SelectionService
+shouldForceSelection(e) {
+  return isMac ? e.altKey && this._optionsService.rawOptions.macOptionClickForcesSelection
+               : e.shiftKey;
+}
+```
+
+So with a Mac driving code-server the Shift branch is unreachable, and Option only
+works if `macOptionClickForcesSelection` is on — which VS Code defaults to
+**false**. Out of the box that means *no modifier at all* can force a selection,
+which reads exactly like a broken terminal. One setting in code-server's
+`User/settings.json` fixes it:
+
+```json
+"terminal.integrated.macOptionClickForcesSelection": true
+```
+
+Then **Option+drag** selects natively and **Cmd+C** copies. The catch is
+unchanged: a native drag spans the whole terminal window and knows nothing about
+panes, so a split layout yields interleaved garbage and it grabs the status line
+too. Fine for grove sessions, which are single-pane.
+
+## OSC 52 does not survive Firefox
+
+`set-clipboard on` is necessary, not sufficient. Following the write all the way
+out of the box:
+
+- **tmux emits it.** `Ms=\E]52;%p1%s;%p2%s\007` is in `xterm-256color`, and tmux's
+  built-in `xterm*:clipboard` feature is already active — the
+  `set -as terminal-features ',xterm-256color:clipboard'` line above is belt and
+  braces, not the thing that turns this on.
+- **code-server has a receiver.** It bundles `@xterm/addon-clipboard` and loads it
+  unconditionally, wired to VS Code's clipboard service. No setting gates it.
+- **The browser refuses the write.** Firefox requires *transient user activation*
+  for `navigator.clipboard.writeText()`. An OSC 52 arriving over the websocket
+  milliseconds after mouse-up has no gesture behind it, so it fails with
+  `DOMException: Clipboard write was blocked due to lack of user activation` —
+  silently, as far as the pane can tell.
+
+Chromium auto-grants `clipboard-write` to the focused tab in a secure context, so
+the identical config works there. **Under Firefox no tmux setting can make
+copy-mode yank reach the Mac clipboard.** Either drive code-server from Chrome, or
+copy with Option+drag / Cmd+C, which runs inside a real keydown handler.
+
+One line tests the whole chain — run it in a pane, then Cmd+V somewhere:
+
+```sh
+printf '\033]52;c;%s\a' "$(printf 'osc52-test' | base64)"
+```
+
+An editor round-trip is the pane-aware fallback when the clipboard is closed to
+you, since `code` works from inside a pane (`VSCODE_IPC_HOOK_CLI` is exported):
+
+```tmux
+bind -T copy-mode-vi Y send -X copy-pipe-no-clear 'cat > /tmp/tmux-copy.txt; code /tmp/tmux-copy.txt'
+```
+
+Lastly, the default `MouseDragEnd1Pane` is `copy-pipe-and-cancel`, and it is the
+*cancel* that snaps you back to the bottom on mouse-up. To keep both the selection
+and your scroll position:
 
 ```tmux
 bind -T copy-mode-vi MouseDragEnd1Pane send -X copy-pipe-no-clear
@@ -246,3 +307,12 @@ None of these are needed for the classic renderer.
   [#58364](https://github.com/anthropics/claude-code/issues/58364),
   [#60185](https://github.com/anthropics/claude-code/issues/60185),
   [#67289](https://github.com/anthropics/claude-code/issues/67289)
+- [tmux wiki: Clipboard](https://github.com/tmux/tmux/wiki/Clipboard)
+- xterm.js [#4329](https://github.com/xtermjs/xterm.js/issues/4329) (force-selection
+  modifier differs per platform), and the bundled
+  `@xterm/xterm/lib/xterm.js` / `@xterm/addon-clipboard` under
+  `/usr/lib/code-server/lib/vscode/node_modules`
+- MDN: [User activation](https://developer.mozilla.org/en-US/docs/Web/Security/Defenses/User_activation),
+  [Clipboard API](https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API)
+- [microsoft/vscode #210302](https://github.com/microsoft/vscode/issues/210302) —
+  OSC 52 in the integrated terminal
