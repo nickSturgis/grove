@@ -48,7 +48,7 @@ Merge into ~/.claude/settings.json:
 {
   "hooks": {
     "UserPromptSubmit": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "$hook_self --state working" } ] }
+      { "hooks": [ { "type": "command", "command": "$hook_self --state working" } ] }
     ],
     "Notification": [
       { "matcher": "permission_prompt", "hooks": [ { "type": "command", "command": "$hook_self --state waiting" } ] }
@@ -57,7 +57,7 @@ Merge into ~/.claude/settings.json:
       { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "$hook_self --state waiting" } ] }
     ],
     "Stop": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "$hook_self --state idle" } ] }
+      { "hooks": [ { "type": "command", "command": "$hook_self --state idle" } ] }
     ]
   }
 }
