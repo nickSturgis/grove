@@ -75,7 +75,7 @@ numbered prompt, which is also the `TERM=dumb` path.
 ## Keeping these files navigable
 
 An `AGENTS.md` orients and routes. It is **not** where a subsystem's reasoning accumulates — that's
-what a companion doc is for (`git-workflow.md`, `docs/specs/`).
+what a companion doc is for (`docs/specs/`).
 
 **Budget: 12,000 characters / ~150 lines per `AGENTS.md`.** Check it whenever you change one:
 
