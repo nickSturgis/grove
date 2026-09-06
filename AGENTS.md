@@ -54,3 +54,26 @@ Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
 
 Check both picker paths (`GROVE_PICKER=fzf` and `GROVE_PICKER=plain`) — they are
 separate code paths and only one gets exercised on any given machine.
+
+
+## Keeping these files navigable
+
+An `AGENTS.md` orients and routes. It is **not** where a subsystem's reasoning accumulates — that's
+what a companion doc is for (`git-workflow.md`, `docs/specs/`).
+
+**Budget: 12,000 characters / ~150 lines per `AGENTS.md`.** Check it whenever you change one:
+
+```sh
+find . -name .venv -prune -o -name worktrees -prune -o -name AGENTS.md -print | xargs wc -lc |
+  awk '$3 != "total" && ($1 > 150 || $2 > 12000) { print "OVER:", $3, $1"L", $2"c" }'
+```
+
+Over budget means the node has stopped routing and started explaining. Fix it by pushing detail
+down — into a child `AGENTS.md`, a companion doc, or the code — **never by trimming facts.** Same
+rule at every level: **a fact lives in exactly one place, and everywhere else links to it.** The
+method for doing that — and for auditing the whole trail — is the `breadcrumb-cleanup` skill.
+
+## Elsewhere
+
+- **Issues are Gitea issues** on `gitea.glowlab.cc` (`glowlab/grove`), driven via
+  `mcp__gitea__*` — there is no `tea` CLI. Cite them inline as `Gitea **#N**`. 
