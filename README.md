@@ -1,32 +1,44 @@
-# cc
+# grove
 
 Launch Claude Code in an isolated git worktree, inside a tmux session that
 outlives your terminal. One bash file.
 
+A grove is a stand of trees — here, the set of worktrees you have Claude
+working in. Plant one per task, survey them, cut them down when merged.
+
 ```
-cc                pick a worktree, or make one if the repo has none
-cc -n             always make a fresh worktree
-cc -l             list this repo's cc worktrees and their state
-cc -k <slug>      kill the session and remove the worktree
-cc --hooks        print the Claude Code hook config for live status
-cc -- <args>      pass args through to claude (e.g. cc -- --continue)
+grove             pick a worktree, or make one if the repo has none
+grove -n          always make a fresh worktree
+grove -l          list this repo's worktrees and their state
+grove -k <slug>   kill the session and remove the worktree
+grove --hooks     print the Claude Code hook config for live status
+grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 ```
 
-Each worktree gets its own branch (`cc/<slug>`) and its own tmux session
-(`cc-<repo>-<slug>`), so parallel Claude sessions never touch each other's
-files. Worktrees live under `$CC_WORKTREE_ROOT` (default
-`~/.cc-worktrees/<repo>/<slug>`), outside your checkout.
+Each worktree gets its own branch (`grove/<slug>`) and its own tmux session
+(`grove-<repo>-<slug>`), so parallel Claude sessions never touch each other's
+files. Worktrees live under `$GROVE_ROOT` (default `~/.grove/<repo>/<slug>`),
+outside your checkout.
+
+`grove -k` refuses to silently discard work: it warns and shows the commits if
+the branch holds anything not merged anywhere else.
 
 ## Install
 
-Drop `cc` on your `$PATH`, then merge `cc --hooks` output into
-`~/.claude/settings.json`. The hooks stamp each session's state onto its tmux
-session, so the picker can sort by what needs you:
+Symlink `grove` onto your `$PATH`, then merge `grove --hooks` output into
+`~/.claude/settings.json`:
+
+```bash
+ln -s "$PWD/grove" ~/.local/bin/grove
+```
+
+The hooks stamp each session's state onto its tmux session, so the picker can
+sort by what needs you:
 
 ```
-  wt3         needs you             cc/wt3 ~2
-  wt1         done (attached)       cc/wt1
-  wt2         working               cc/wt2 ~7
+  wt3         needs you             grove/wt3 ~2
+  wt1         done (attached)       grove/wt1
+  wt2         working               grove/wt2 ~7
 ```
 
 Needs `git` and `tmux`; uses `fzf` for the picker (with a live pane preview) if
@@ -36,9 +48,9 @@ it's installed, otherwise a numbered prompt.
 
 | Env | Default | |
 |---|---|---|
-| `CC_WORKTREE_ROOT` | `~/.cc-worktrees` | where worktrees go |
-| `CC_CLAUDE` | `claude` | the binary to launch |
-| `CC_PICKER` | `auto` | `auto`, `fzf`, or `plain` |
+| `GROVE_ROOT` | `~/.grove` | where worktrees go |
+| `GROVE_CLAUDE` | `claude` | the binary to launch |
+| `GROVE_PICKER` | `auto` | `auto`, `fzf`, or `plain` |
 
 ## Credit
 

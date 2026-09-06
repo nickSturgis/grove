@@ -1,28 +1,46 @@
 # AGENTS.md
 
-Single-file bash tool: `cc` launches Claude Code in a per-task git worktree
+Single-file bash tool: `grove` launches Claude Code in a per-task git worktree
 inside a detached tmux session. No build, no deps beyond `git`, `tmux`,
 optionally `fzf`.
 
 ## Rules
 
-- Everything lives in `cc`. Keep it one file, POSIX-ish bash, `set -euo pipefail`.
-- `cc --state <s>` is a hot path (runs as a Claude Code hook on every prompt).
+- Everything lives in `grove`. Keep it one file, POSIX-ish bash, `set -euo pipefail`.
+- `grove --state <s>` is a hot path (runs as a Claude Code hook on every prompt).
   Keep it at the top of the file, before any `git`/`tmux` discovery, and never
   let it fail — hooks that error are user-visible noise.
-- Worktrees go under `$CC_WORKTREE_ROOT`, never inside the repo.
+- `grove -h` prints lines 2-13 of the file itself. Edits to the header comment
+  must preserve that line range.
+- Worktrees go under `$GROVE_ROOT`, never inside the repo. Branches are
+  `grove/<slug>`, sessions are `grove-<repo>-<slug>`.
+- Never destroy work without confirming: `-k` checks both uncommitted files and
+  commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
-  rows (`cc --_rows`, consumed by the fzf reload binding).
+  rows (`grove --_rows`, consumed by the fzf reload binding).
 - Rows are tab-delimited `display\tsession\tpath`. `display` must not contain tabs.
+
+## Gotchas found the hard way
+
+- fzf substitutes `{2}` as a *shell-quoted* string, so it must never sit inside
+  quotes: `-t ={2}:` works, `-t "={2}:"` passes literal quote characters.
+- `git rev-list --exclude=<glob>` globs are relative to the ref-listing option
+  that follows, so it's `--exclude=grove/wt1 --branches`, not
+  `--exclude=refs/heads/grove/wt1`. And `--all` silently includes every
+  worktree's HEAD, which would always protect the branch you're testing.
+- `a | b || c` binds `||` to `b`. Wrap the fallback: `{ a || c; } | b`.
 
 ## Testing
 
 No test suite. Verify by hand in a scratch repo:
 
 ```bash
-export CC_WORKTREE_ROOT=/tmp/ccwt CC_CLAUDE=/bin/true
-cd /tmp/scratch-repo && cc -l && cc -n && cc -k wt1
+export GROVE_ROOT=/tmp/grovetest GROVE_CLAUDE=/bin/true
+cd /tmp/scratch-repo && grove -l && grove -n && grove -k wt1
 ```
 
-Check both picker paths (`CC_PICKER=fzf` and `CC_PICKER=plain`) — they are
+Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
+`printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
+
+Check both picker paths (`GROVE_PICKER=fzf` and `GROVE_PICKER=plain`) — they are
 separate code paths and only one gets exercised on any given machine.
