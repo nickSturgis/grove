@@ -317,8 +317,12 @@ new_worktree() {
   printf '%s\n' "$path"
 }
 
+# `a && b || c` would run the attach whenever switch-client failed, so a bad
+# switch from inside tmux turned into a nested-session error. Spell out the else.
 attach() {
-  [ -n "${TMUX:-}" ] && tmux switch-client -t "=$1" || tmux attach-session -t "=$1"
+  if [ -n "${TMUX:-}" ]; then tmux switch-client  -t "=$1"
+  else                        tmux attach-session -t "=$1"
+  fi
 }
 
 launch() {
@@ -335,6 +339,12 @@ launch() {
     # them; an existing one is attached as it stands. tmux -e needs 3.2.
     tmux new-session -d -s "$session" -c "$path" \
       -e GROVE_SLUG="$slug" -e GROVE_MAIN_ROOT="$main_root" "$cmd"
+    # A server still shutting down — exit-empty fires the moment its last session
+    # dies — accepts new-session and then takes the session down with it. The
+    # attach would race the corpse and the client would print a bare "[exited]",
+    # which reads like grove crashed. Confirm the session before attaching.
+    tmux has-session -t "=$session" 2>/dev/null \
+      || die "tmux dropped the new session: $session (server restarting — try again)"
   fi
   attach "$session"
 }
