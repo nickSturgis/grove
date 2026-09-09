@@ -119,10 +119,26 @@ down — into a child `AGENTS.md`, a companion doc, or the code — **never by t
 rule at every level: **a fact lives in exactly one place, and everywhere else links to it.** The
 method for doing that — and for auditing the whole trail — is the `breadcrumb-cleanup` skill.
 
+## Agent skills
+
+### Issue tracker
+
+Gitea issues on `gitea.glowlab.cc` (`glowlab/grove`), via `mcp__gitea__*`.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the root. See `docs/agents/domain.md`.
+
 ## Elsewhere
 
-- **Issues are Gitea issues** on `gitea.glowlab.cc` (`glowlab/grove`), driven via
-  `mcp__gitea__*` — there is no `tea` CLI. Cite them inline as `Gitea **#N**`.
+- **Issues are Gitea issues.** Repo, tools and conventions are canonical in
+  `docs/agents/issue-tracker.md`; never restated here.
 - **The workflow that lands this repo's work** — branching, committing, merging
   to `main` — is the `git-workflow@glow` skill
   (`~/glow-marketplace/plugins/git-workflow/skills/git-workflow/SKILL.md`).
