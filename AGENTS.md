@@ -64,6 +64,11 @@ optionally `fzf`.
   "can't find pane" where `kill-session` accepts it. The trailing colon is required.
 - The plain picker marks the current row with a pointer, not reverse video: each row
   carries its own colour resets, which would cancel a reverse attribute mid-line.
+- `exit-empty` (on by default) stops the tmux **server** the moment its last
+  session dies, and a server mid-shutdown still accepts `new-session` before
+  taking that session down with it. `launch` therefore `has-session`-checks
+  before attaching: without it the client prints a bare `[exited]`, which reads
+  like grove crashed when nothing of grove's went wrong.
 - fzf `change-header` needs 0.42; Debian still ships **0.38**, which dies with
   "unknown action" on an unknown binding — taking the whole picker with it. That
   is why the tab bar rides in on `--header-lines`. Check any new binding against
@@ -100,6 +105,18 @@ cursor UIs, so driving them takes a real terminal: run grove in a detached tmux
 session, `send-keys -t =<session>:` the arrows, then `capture-pane` to see the frame.
 The plain picker needs stderr to be a tty — redirect it and it falls back to the
 numbered prompt, which is also the `TERM=dumb` path.
+
+**Tear down by name, never by sweep.** Test sessions share one tmux server with
+the owner's real ones, so filter every cleanup to the sessions the test made:
+
+```bash
+tmux list-sessions -F '#{session_name}' | grep -E '^(grove-sr|driver|pick)' |
+  while read -r s; do tmux kill-session -t "=$s"; done
+```
+
+A bare `for s in $(tmux list-sessions -F '#{session_name}')` has already killed a
+live working session once — and because it took the last session with it, the
+server went too, so the owner's next `grove` raced a shutting-down server.
 
 
 ## Keeping these files navigable
