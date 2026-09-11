@@ -30,6 +30,12 @@ optionally `fzf`.
   up, so it cannot trip the `exit-empty` race below — and it fires only when the
   cost is provably nil: idle per the `Stop` hook, and nobody attached. Anything
   else just wears the `↑<version>` marker. See `restartable` for why.
+- Opening a worktree with **no live session** fast-forwards it onto main first:
+  `maybe_sync`, called only from `launch`'s new-session branch, and only when the
+  worktree is clean (untracked counts) and has no commits main lacks. "Main" is
+  whatever the main checkout has out — what `new_worktree` branches from — and
+  `base_ref` resolves it per path, because sessions-tab rows span repos. Listings
+  mark the gap as `⇡own⇣behind`; double arrows, because `↑` is the claude marker.
 - Never destroy work without confirming: `-k` checks both uncommitted files and
   commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
