@@ -12,7 +12,11 @@
 #
 # A session keeps the claude binary it started with, and Claude Code moves on
 # most days. Stale sessions are marked ↑<version>; opening one restarts it with
-# --continue, as long as it is idle and nobody is attached.
+# --continue, as long as it is idle and nobody is attached. A terminal left
+# sitting in a session counts as attached, so a session you keep a window parked
+# in only ever wears the marker — exit it and reopen to pick the new claude up.
+# Sessions started before grove learned to stamp the binary are never marked at
+# all; reopening one once starts stamping it.
 #
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
