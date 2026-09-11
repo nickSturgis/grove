@@ -10,6 +10,10 @@
 #   grove --hooks     print the Claude Code hook config for live status
 #   grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 #
+# A session keeps the claude binary it started with, and Claude Code moves on
+# most days. Stale sessions are marked ↑<version>; opening one restarts it with
+# --continue, as long as it is idle and nobody is attached.
+#
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
 #
@@ -105,22 +109,64 @@ session_for() { printf 'grove-%s-%s' "$repo_slug" "$(sanitize "$1")"; }
 
 # --- one tmux round-trip for every session's attach state and status ---------
 # Reloaded after a kill, so the pickers never offer a session that just died.
-declare -A S_ATTACHED=() S_STATE=() S_PATH=() S_CREATED=()
+declare -A S_ATTACHED=() S_STATE=() S_PATH=() S_CREATED=() S_CLAUDE=()
 refresh_sessions() {
-  local n a st cr p
-  S_ATTACHED=() S_STATE=() S_PATH=() S_CREATED=()
-  while IFS='|' read -r n a st cr p; do
+  local n a st cr cl p
+  S_ATTACHED=() S_STATE=() S_PATH=() S_CREATED=() S_CLAUDE=()
+  # @grove_claude holds a stamp, which may contain spaces but never a '|', so it
+  # reads before the path rather than after it.
+  while IFS='|' read -r n a st cr cl p; do
     [ -n "$n" ] || continue
     S_ATTACHED["$n"]=$a; S_STATE["$n"]=$st
-    S_CREATED["$n"]=$cr; S_PATH["$n"]=$p
+    S_CREATED["$n"]=$cr; S_CLAUDE["$n"]=$cl; S_PATH["$n"]=$p
   done < <(tmux list-sessions \
-    -F '#{session_name}|#{session_attached}|#{@grove_state}|#{session_created}|#{session_path}' \
+    -F '#{session_name}|#{session_attached}|#{@grove_state}|#{session_created}|#{@grove_claude}|#{session_path}' \
     2>/dev/null || true)
 }
 refresh_sessions
 
 alive()    { [ -n "${S_ATTACHED[$1]+x}" ]; }
 attached() { [ "${S_ATTACHED[$1]:-0}" != 0 ]; }
+
+# --- is a session running yesterday's claude? --------------------------------
+# A tmux session pins the binary it launched, and Claude Code updates itself in
+# the background most days, so a session left running over a weekend is stale
+# the moment you come back to it. The stamp is "<mtime>.<size> <realpath>":
+# the native installer swings a symlink at versions/<n.n.n>, so the path moves
+# and doubles as the version label; npm and friends overwrite in place, where
+# only the mtime and size move. Nothing resolvable stamps "? ?", which compares
+# equal to itself forever — an unreadable claude silently turns this off.
+CLAUDE_STAMP=''
+claude_stamp() {
+  if [ -z "$CLAUDE_STAMP" ]; then
+    local p='' st=''
+    if p=$(command -v "$GROVE_CLAUDE" 2>/dev/null); then
+      p=$(readlink -f "$p" 2>/dev/null || printf '%s' "$p")
+      st=$(stat -c '%Y.%s' "$p" 2>/dev/null || stat -f '%m.%z' "$p" 2>/dev/null) || st=''
+    fi
+    CLAUDE_STAMP="${st:-?} ${p:-?}"
+  fi
+  printf '%s' "$CLAUDE_STAMP"
+}
+
+claude_version() {  # the version on disk, or '' when the path carries no number
+  local v; v=$(claude_stamp); v=${v#* }; v=${v##*/}
+  case "$v" in [0-9]*.[0-9]*) printf '%s' "$v" ;; esac
+}
+
+# Unstamped means a grove too old to stamp started it: say nothing rather than
+# claim every pre-existing session is stale.
+stale() {
+  local was=${S_CLAUDE[$1]:-}
+  [ -n "$was" ] || return 1
+  [ "$was" != "$(claude_stamp)" ]
+}
+
+upd_note() {  # session -> " ↑2.1.268", the version it would restart onto
+  stale "$1" || return 0
+  local v; v=$(claude_version)
+  printf ' %s↑%s%s' "$c_ylw" "${v:-new}" "$c_rst"
+}
 
 # --- colour -----------------------------------------------------------------
 # fzf is given --ansi; the plain picker prints these raw. rows() re-runs in a
@@ -219,7 +265,7 @@ rows() {
     IFS='|' read -r rank label <<<"$(status_of "$session")"
     printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
       "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
-      "$(describe "$p")" "$session" "$p"
+      "$(describe "$p")$(upd_note "$session")" "$session" "$p"
   done < <(grove_worktrees) | sort -t$'\t' -k1,1n | cut -f2-
 }
 
@@ -256,7 +302,7 @@ session_rows() {
     IFS='|' read -r rank label <<<"$(status_of "$n")"
     cr=${S_CREATED[$n]:-0}; case "$cr" in ''|*[!0-9]*) cr=$now ;; esac
     age=$(fmt_age $((now - cr)))
-    if [ -n "$p" ] && [ -d "$p" ]; then note=$(describe "$p")
+    if [ -n "$p" ] && [ -d "$p" ]; then note="$(describe "$p")$(upd_note "$n")"
     else                                 note="${c_red}gone${c_rst}"
     fi
     printf '%s\t%s\t%s%-24s%s  %s%-20s%s  %s%7s%s  %s\t%s\t%s\tsessions\n' \
@@ -325,26 +371,75 @@ attach() {
   fi
 }
 
+claude_cmd() {  # claude args -> the line a pane runs
+  local cmd a
+  cmd=$(printf '%q' "$GROVE_CLAUDE")
+  for a in "$@"; do cmd="$cmd $(printf '%q' "$a")"; done
+  printf '%s; exec %s' "$cmd" "${SHELL:-/bin/bash}"   # survive /exit
+}
+
+stamp_claude() {  # record which claude this session is now running
+  # set-option takes a *pane* target, so the trailing colon is load-bearing:
+  # without it the call quietly does nothing, and -q swallows the error.
+  tmux set-option -t "=$1:" -q @grove_claude "$(claude_stamp)" 2>/dev/null || true
+}
+
+# --- pick up a claude that updated under a running session -------------------
+# Only when the restart provably costs nothing: the Stop hook says the last turn
+# ended, and nobody is attached — so there is no half-typed prompt to throw away,
+# and no in-flight turn to cut off. Working, waiting and unstamped (hooks not
+# installed) sessions keep the binary they have and just wear the ↑ marker. The
+# attached test is also what stops a picker running inside the session from
+# respawning the pane it is standing in.
+restartable() {
+  local s=$1
+  alive "$s" && stale "$s" && ! attached "$s" && [ "${S_STATE[$s]:-}" = idle ]
+}
+
+has_resume() {
+  local a
+  for a in "$@"; do
+    case "$a" in -c|--continue|-r|--resume) return 0 ;; esac
+  done
+  return 1
+}
+
+# respawn-pane, not kill-session + new-session: the session survives, so this
+# never trips exit-empty's shutdown race, and keeps its name, age and env.
+maybe_restart() {
+  local session="$1" path="$2"; shift 2
+  restartable "$session" || return 0
+  [ -n "$path" ] && [ -d "$path" ] || return 0
+  local -a args=(${@+"$@"})
+  has_resume ${args[@]+"${args[@]}"} || args=(--continue ${args[@]+"${args[@]}"})
+  printf 'grove: claude %s is out — restarting %s where it left off\n' \
+    "$(claude_version)" "$(basename "$path")" >&2
+  if tmux respawn-pane -k -t "=$session:" -c "$path" \
+       "$(claude_cmd ${args[@]+"${args[@]}"})" 2>/dev/null; then
+    stamp_claude "$session"
+  fi
+}
+
 launch() {
   local path="$1"; shift
-  local slug session cmd
+  local slug session
   slug=$(basename "$path"); session=$(session_for "$slug")
   if ! alive "$session"; then
-    cmd=$(printf '%q' "$GROVE_CLAUDE")
-    for a in "$@"; do cmd="$cmd $(printf '%q' "$a")"; done
-    cmd="$cmd; exec ${SHELL:-/bin/bash}"          # survive /exit
     # GROVE_SLUG/GROVE_MAIN_ROOT tell whatever runs in here that it is a grove
     # worktree, and where the main checkout is. The branch name is the weaker
     # fallback tell — it misses a detached HEAD. Only a session we create gets
     # them; an existing one is attached as it stands. tmux -e needs 3.2.
     tmux new-session -d -s "$session" -c "$path" \
-      -e GROVE_SLUG="$slug" -e GROVE_MAIN_ROOT="$main_root" "$cmd"
+      -e GROVE_SLUG="$slug" -e GROVE_MAIN_ROOT="$main_root" "$(claude_cmd "$@")"
     # A server still shutting down — exit-empty fires the moment its last session
     # dies — accepts new-session and then takes the session down with it. The
     # attach would race the corpse and the client would print a bare "[exited]",
     # which reads like grove crashed. Confirm the session before attaching.
     tmux has-session -t "=$session" 2>/dev/null \
       || die "tmux dropped the new session: $session (server restarting — try again)"
+    stamp_claude "$session"
+  else
+    maybe_restart "$session" "$path" "$@"
   fi
   attach "$session"
 }
@@ -355,7 +450,10 @@ launch() {
 open_row() {
   local session="$1" path="$2"; shift 2
   if [ "$path" = "$NEW_SENTINEL" ]; then launch "$(new_worktree)" "$@"; return; fi
-  if alive "$session"; then attach "$session"; return; fi
+  if alive "$session"; then
+    maybe_restart "$session" "$path" "$@"
+    attach "$session"; return
+  fi
   [ "$in_repo" = 1 ] || die "session is gone: $session"
   launch "$path" "$@"
 }
