@@ -18,6 +18,12 @@
 # Sessions started before grove learned to stamp the binary are never marked at
 # all; reopening one once starts stamping it.
 #
+# Opening a worktree with no live session first fast-forwards it onto main — the
+# branch the main checkout has out, which new worktrees branch from too — but
+# only when it is clean and has no commits of its own, so nothing can be lost.
+# Listings mark how far each worktree sits from main: ⇡ its own commits, ⇣ the
+# ones main has moved on by. A clean worktree wearing only ⇣ catches up on open.
+#
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
 #
@@ -247,29 +253,50 @@ path_for_slug() {
   return 0
 }
 
-describe() {
-  local p="$1" br dirty
+# "Main" is the branch the main checkout has out: what new_worktree branches
+# from, and what maybe_sync fast-forwards onto. Resolved from the path, not
+# $main_root, because a sessions-tab row can belong to another repo. The full
+# ref, so a file named "main" never makes a revision ambiguous. A detached or
+# bare main checkout gives '', which turns off the marker and the sync alike.
+base_ref() {  # path -> refs/heads/<branch>, or ''
+  git -C "$1" worktree list --porcelain 2>/dev/null \
+    | awk '/^$/{exit} /^branch /{print substr($0,8); exit}' || true
+}
+
+ahead_behind() {  # path, ref -> "ahead behind": HEAD's own commits, then ref's
+  local out
+  out=$(git -C "$1" rev-list --left-right --count "HEAD...$2" 2>/dev/null) || out='0 0'
+  printf '%s' "$out"
+}
+
+describe() {  # path [base ref] -> "grove/wt1 ~2 ⇡1⇣3"; rows() passes the ref once
+  local p="$1" base="${2-}" br dirty ahead behind ab='' note=''
   br=$(git -C "$p" symbolic-ref --short HEAD 2>/dev/null || echo detached)
   dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l)
-  if [ "$dirty" -gt 0 ]; then
-    printf '%s%s%s %s~%s%s' "$c_dim" "$br" "$c_rst" "$c_ylw" "$dirty" "$c_rst"
-  else
-    printf '%s%s%s' "$c_dim" "$br" "$c_rst"
+  if [ "$dirty" -gt 0 ]; then note=" $c_ylw~$dirty$c_rst"; fi
+  [ $# -ge 2 ] || base=$(base_ref "$p")
+  if [ -n "$base" ]; then
+    read -r ahead behind <<<"$(ahead_behind "$p" "$base")"
+    if [ "${ahead:-0}"  -gt 0 ]; then ab="⇡$ahead"; fi
+    if [ "${behind:-0}" -gt 0 ]; then ab="$ab⇣$behind"; fi
+    if [ -n "$ab" ]; then note="$note $c_cyn$ab$c_rst"; fi
   fi
+  printf '%s%s%s%s' "$c_dim" "$br" "$c_rst" "$note"
 }
 
 # --- machine-readable rows: display <TAB> session <TAB> path <TAB> tab -------
 # The tab field is what the pickers' kill key reloads, so a kill on either tab
 # comes back to the tab you were on.
 rows() {
-  local p slug session rank label pad
+  local p slug session rank label base
+  base=$(base_ref "$main_root")
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     slug=$(basename "$p"); session=$(session_for "$slug")
     IFS='|' read -r rank label <<<"$(status_of "$session")"
     printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
       "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
-      "$(describe "$p")$(upd_note "$session")" "$session" "$p"
+      "$(describe "$p" "$base")$(upd_note "$session")" "$session" "$p"
   done < <(grove_worktrees) | sort -t$'\t' -k1,1n | cut -f2-
 }
 
@@ -424,11 +451,36 @@ maybe_restart() {
   fi
 }
 
+# --- catch a worktree up with main before a fresh session starts in it --------
+# The same bar the restart holds: only when it provably costs nothing. launch
+# calls this only on its way to creating a session, so no conversation is
+# holding the old files in its head. Nothing uncommitted — untracked files too,
+# the same dirty test as -k — and no commits main lacks, so --ff-only has
+# nothing to merge and nothing to lose. Anything else keeps its commit and just
+# shows ⇡/⇣ in the listing. One edge is accepted: like any checkout, the
+# fast-forward overwrites an *ignored* file that main has since started tracking.
+maybe_sync() {
+  local p=$1 ref base ahead behind
+  ref=$(git -C "$p" symbolic-ref -q HEAD 2>/dev/null) || return 0
+  case "$ref" in refs/heads/grove/*) ;; *) return 0 ;; esac
+  base=$(base_ref "$p"); [ -n "$base" ] || return 0
+  [ -z "$(git -C "$p" status --porcelain 2>/dev/null)" ] || return 0
+  read -r ahead behind <<<"$(ahead_behind "$p" "$base")"
+  [ "${ahead:-0}" = 0 ] && [ "${behind:-0}" -gt 0 ] || return 0
+  if git -C "$p" merge --ff-only --quiet "$base" >/dev/null 2>&1; then
+    printf 'grove: fast-forwarded %s to %s (+%s)\n' \
+      "$(basename "$p")" "${base#refs/heads/}" "$behind" >&2
+  else
+    printf "grove: couldn't fast-forward %s — opening it as it was\n" "$(basename "$p")" >&2
+  fi
+}
+
 launch() {
   local path="$1"; shift
   local slug session
   slug=$(basename "$path"); session=$(session_for "$slug")
   if ! alive "$session"; then
+    maybe_sync "$path"
     # GROVE_SLUG/GROVE_MAIN_ROOT tell whatever runs in here that it is a grove
     # worktree, and where the main checkout is. The branch name is the weaker
     # fallback tell — it misses a detached HEAD. Only a session we create gets

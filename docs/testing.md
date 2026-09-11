@@ -46,6 +46,30 @@ picker, and the restart never runs. And `env -u TMUX`, always — grove attaches
 with `switch-client` when `$TMUX` is set, which yanks your own terminal into the
 test session.
 
+## The fast-forward on open
+
+`GROVE_CLAUDE=/bin/true` is enough: the pane falls through to a shell and the
+session stays up, so kill it by name before every open or the sync (rightly)
+never runs. Move main with an empty commit in the main checkout:
+
+```bash
+git commit -q --allow-empty -m on-main   # in the main checkout
+grove -l                                 # expect ⇣1 on wt1
+```
+
+Open it from inside the worktree, same rules as above, and expect
+`grove: fast-forwarded wt1 to main (+1)` with the marker gone from `grove -l`.
+Then force each guard and confirm the marker still reads right but `grove/wt1`
+stays put:
+
+- an untracked file in the worktree — `~1 ⇣1`
+- a commit on `grove/wt1`, then another on main — `⇡1⇣1`
+- a live session — attaches, no sync
+- the main checkout on a detached HEAD — no marker at all
+
+`grove -s` from a second scratch repo must still show the first repo's marker:
+that is what proves `base_ref` resolves per path.
+
 Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
 `printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
 
