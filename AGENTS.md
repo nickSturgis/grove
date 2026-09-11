@@ -23,6 +23,13 @@ optionally `fzf`.
   `worktree-<name>`), which grove must never list or delete, and the branch test
   also keeps finding worktrees left over from the old `$GROVE_ROOT` layout. A
   grove worktree on a detached HEAD drops out of the listing; that's accepted.
+- A session pins the claude binary it launched, so it goes stale as Claude Code
+  updates under it. `@grove_claude` stamps that binary at launch and `stale`
+  compares; an **unstamped** session (started by an older grove) is never stale.
+  The restart is a `respawn-pane`, never kill + new-session — the session stays
+  up, so it cannot trip the `exit-empty` race below — and it fires only when the
+  cost is provably nil: idle per the `Stop` hook, and nobody attached. Anything
+  else just wears the `↑<version>` marker. See `restartable` for why.
 - Never destroy work without confirming: `-k` checks both uncommitted files and
   commits reachable from no other ref.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
@@ -60,8 +67,10 @@ optionally `fzf`.
 - `a | b || c` binds `||` to `b`. Wrap the fallback: `{ a || c; } | b`.
 - `printf '%-10s'` counts ANSI escape bytes as width, so pad the plain string and
   wrap the padded result in colour — never colour first.
-- tmux `send-keys`/`capture-pane` take a *pane* target, so `-t =<session>` fails with
-  "can't find pane" where `kill-session` accepts it. The trailing colon is required.
+- tmux `send-keys`/`capture-pane`/`respawn-pane`/`set-option` take a *pane* target,
+  so `-t =<session>` fails with "can't find pane" where `kill-session` accepts it.
+  The trailing colon is required — and on `set-option -q` the failure is silent,
+  so the option simply never gets set.
 - The plain picker marks the current row with a pointer, not reverse video: each row
   carries its own colour resets, which would cancel a reverse attribute mid-line.
 - `exit-empty` (on by default) stops the tmux **server** the moment its last
