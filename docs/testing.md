@@ -118,6 +118,44 @@ git worktree lock --reason "claude session wt1 (pid $$ start 1)" <path>
 git worktree lock <path>
 ```
 
+## The remove key
+
+`grove --_remove <path> <session>` is what the fzf binding runs, so every refusal
+can be forced from a shell without a picker at all — and must be, one per
+worktree, because the first one that matches wins:
+
+```bash
+B=/tmp/scratch-repo/.claude/worktrees
+grove --_remove $B/wt1 grove-sr1-wt1     # clean and merged: the only one that acts
+grove --_remove $B/wt2 -                 # an untracked file is enough to refuse
+grove --_remove $B/wt3 -                 # a commit of its own
+grove --_remove $B/wt4 -                 # unadopted — the branch test, not the path
+grove --_remove %new% -                  # the picker's synthetic last row
+grove --_remove /tmp/sr1 -               # the main checkout, run from outside it
+(cd $B/wt5 && grove --_remove $B/wt5 -)  # standing in it
+```
+
+Both lock states from the `-k` section apply here unchanged: live refuses, stale
+clears and removes. Check after each that `git worktree list` and `git branch
+--list` are untouched — a refusal that half-acted is the failure that matters.
+
+Then prove it is repo-agnostic, which is the whole reason it reads no
+`$main_root`: from the **second** scratch repo, remove a worktree of the first by
+path. The session named in argv dies with it.
+
+fzf's outcome line travels through a file, so drive that chain by hand — it is
+the part no `--_remove` call on its own covers:
+
+```bash
+NOTE=$(mktemp); export GROVE_ANSI=1 GROVE_NOTE=$NOTE
+grove --_remove $B/wt2 -; cat $NOTE      # the refusal, coloured
+grove --_rows worktrees | sed -n 1p      # rides the header line, after the tabs
+grove --_rows worktrees | sed -n 1p      # and is gone: one action, one showing
+```
+
+In the plain picker `d` is the same key. Watch the frame, not just the text: the
+note adds a line, so switching tabs afterwards has to leave no stranded rows.
+
 Check both picker paths (`GROVE_PICKER=fzf` and `GROVE_PICKER=plain`) — they are
 separate code paths and only one gets exercised on any given machine. Both are now
 cursor UIs, so driving them takes a real terminal: run grove in a detached tmux
