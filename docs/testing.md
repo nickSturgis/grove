@@ -1,6 +1,8 @@
 # Testing grove
 
 No test suite. grove is verified by hand in a scratch repo; this is the procedure.
+Set up [the test's own tmux server](#isolating-the-tests-tmux-server) **first** —
+a teardown on the owner's server has already cost six days.
 
 ```bash
 export GROVE_CLAUDE=/bin/true
@@ -123,8 +125,42 @@ session, `send-keys -t =<session>:` the arrows, then `capture-pane` to see the f
 The plain picker needs stderr to be a tty — redirect it and it falls back to the
 numbered prompt, which is also the `TERM=dumb` path.
 
-**Tear down by name, never by sweep.** Test sessions share one tmux server with
-the owner's real ones, so filter every cleanup to the sessions the test made:
+## Isolating the test's tmux server
+
+grove drives tmux, and by default that is the **owner's** tmux server, carrying
+their real working sessions. Give the run its own server instead, so no teardown
+of yours can reach theirs:
+
+```bash
+export TMUX_TMPDIR=/tmp/grove-test-tmux && mkdir -p "$TMUX_TMPDIR"
+env -u TMUX grove -n      # every tmux call grove makes now lands on the test server
+```
+
+**`TMUX_TMPDIR` alone isolates nothing**, and the way it fails is silent. A tmux
+client with `$TMUX` set connects to the socket named in that variable and ignores
+`TMUX_TMPDIR` entirely — so inside a tmux pane (the normal case: agents run inside
+grove sessions) the "test" server *is* the owner's, and a `kill-server` you believe
+is scoped to your own run destroys theirs. `env -u TMUX` is what makes the
+isolation real. It is the same `env -u TMUX` the sections above already require,
+for the unrelated reason that `switch-client` would otherwise yank your terminal
+into the test session — but this is the consequence that costs days. Prove the
+isolation before trusting it:
+
+```bash
+env -u TMUX TMUX_TMPDIR=/tmp/grove-test-tmux tmux list-sessions   # test sessions only
+ls "$TMUX_TMPDIR/tmux-$(id -u)/"                                  # its own socket exists
+```
+
+With that proven, the whole run is discardable in one command — and only then is
+`kill-server` ever the right verb:
+
+```bash
+env -u TMUX TMUX_TMPDIR=/tmp/grove-test-tmux tmux kill-server
+```
+
+**Tear down by name, never by sweep.** Whenever the run is *not* provably on its
+own socket, filter every cleanup to the sessions the test made, and never call
+`kill-server` at all:
 
 ```bash
 tmux list-sessions -F '#{session_name}' | grep -E '^(grove-sr|driver|pick)' |
@@ -134,3 +170,32 @@ tmux list-sessions -F '#{session_name}' | grep -E '^(grove-sr|driver|pick)' |
 A bare `for s in $(tmux list-sessions -F '#{session_name}')` has already killed a
 live working session once — and because it took the last session with it, the
 server went too, so the owner's next `grove` raced a shutting-down server.
+
+## A wedged server reads like a crash
+
+The same sweep, run a second time, did worse than kill sessions: it wedged the
+server for six days. Three `attach-session` clients whose terminals had already
+died never disconnected, so the shutdown the sweep started could never finish. A
+tmux server in that state **stays alive and listening** — it `accept()`s every new
+connection and closes it instantly with no reply, so every tmux command in every
+project fails with `server exited unexpectedly`. That message reads like a crash
+and is the opposite: `ps` shows the server running, and `ss -xlp` shows it still
+holding its socket.
+
+The blast radius reached past tmux. Eight claude processes were orphaned to PID 1
+and SIGSTOPped (`SIGTTIN`, delivered because their process group was orphaned),
+which left them unable to reap their MCP children — 29 zombies. Nothing in grove
+was at fault and no worktree was touched; the damage was entirely in the teardown.
+
+Clear it by killing the **clients**, not the server. Once the last stuck client
+goes, the server completes its shutdown and exits on its own, so `kill -9` on the
+server is never the fix:
+
+```bash
+ps -eo pid,stat,tty,args | grep '[t]mux attach-session'   # a stuck client's tty is gone
+kill <pid>...                                             # server then exits by itself
+```
+
+Match on the argv, not the process name: tmux renames itself to `tmux: server` and
+`tmux: client`, so `ps -C tmux` finds nothing at all — including the server you are
+trying to prove is still alive.
