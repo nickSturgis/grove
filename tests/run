@@ -1,0 +1,761 @@
+#!/usr/bin/env bash
+# tests/run — grove's scriptable surface: argv in, text and git state out.
+# What no script can reach — the two pickers, attach, the stale-claude restart —
+# is docs/testing.md's half.
+#
+#   tests/run                 every group
+#   tests/run rows remove     only those groups
+#   tests/run -l              list the groups
+#   tests/run -v              echo each grove invocation
+#
+# The run builds its own scratch repos and its own tmux server — fresh
+# TMUX_TMPDIR, $TMUX unset, because a client with $TMUX set ignores TMUX_TMPDIR
+# and would land on the owner's real sessions — and refuses to start until it
+# has proved the server is its own. GROVE_CLAUDE=/bin/true: no claude ever runs.
+# Teardown detaches clients before kill-server; a client whose terminal is
+# already gone blocks the shutdown and wedges the server (docs/gotchas.md).
+
+set -uo pipefail   # no -e: a failed assertion reports, it does not abort the run
+
+GROVE=${GROVE_BIN:-$(cd "$(dirname "$0")/.." && pwd -P)/grove}
+[ -x "$GROVE" ] || { printf 'no grove at %s\n' "$GROVE" >&2; exit 2; }
+TMO=20 VERBOSE=0
+
+# --- isolation ---------------------------------------------------------------
+unset TMUX
+SB=$(mktemp -d "${TMPDIR:-/tmp}/grove-test.XXXXXX") || exit 2
+SB=$(cd "$SB" && pwd -P)                 # tmux reports real paths; git too
+export HOME="$SB/home" TMUX_TMPDIR="$SB/tmux"
+export GROVE_CLAUDE=/bin/true
+unset GROVE_ROOT GROVE_PICKER GROVE_ANSI GROVE_NOTE NO_COLOR
+mkdir -p "$HOME" "$TMUX_TMPDIR"
+ERRF="$SB/err" OWNED=0 HAVE_E=1
+
+cleanup() {
+  if [ "$OWNED" = 1 ]; then
+    tmux list-clients -F '#{client_name}' 2>/dev/null \
+      | while read -r c; do tmux detach-client -t "$c" 2>/dev/null; done
+    tmux kill-server 2>/dev/null
+  fi
+  case "$SB" in */grove-test.??????) rm -rf "$SB" ;; esac
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+# An anchor session keeps the server up for the whole run, so no test races
+# exit-empty's shutdown. Not named grove-*, so nothing of grove's lists it.
+# -e is tmux 3.2; launch needs it, so a failure here only skips that group.
+tmux new-session -d -s anchor -c "$HOME" -e GROVE_TEST=1 'sleep 86400' 2>/dev/null \
+  || { HAVE_E=0; tmux new-session -d -s anchor -c "$HOME" 'sleep 86400' \
+         || { printf 'cannot start a tmux server in %s\n' "$TMUX_TMPDIR" >&2; exit 2; }; }
+have=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+[ "$have" = anchor ] || {
+  printf 'refusing to run: %s holds sessions this run did not make:\n%s\n' \
+    "$TMUX_TMPDIR" "$have" >&2; exit 2; }
+OWNED=1
+SOCK=$(tmux display-message -p '#{socket_path},#{pid},0')
+
+# --- harness -----------------------------------------------------------------
+PASS=0 FAIL=0 SKIPPED=0 CWD=$SB OUT='' ERR='' RC=0
+group() { printf '\n%s\n' "$1"; }
+ok()    { PASS=$((PASS + 1)); printf '  ok    %s\n' "$1"; }
+bad()   { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"
+          [ $# -gt 1 ] && printf '        %s\n' "$(printf '%s' "$2" | tr '\n\t' '|~' | cut -c1-200)"
+          return 0; }
+skip()  { SKIPPED=$((SKIPPED + 1)); printf '  skip  %s (%s)\n' "$1" "$2"; }
+
+eq()     { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want [$3] got [$2]"; fi }
+has()    { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "no [$3] in: $2" ;; esac }
+hasnt()  { case "$2" in *"$3"*) bad "$1" "[$3] in: $2" ;; *) ok "$1" ;; esac }
+rcis()   { eq "$1" "$RC" "$2"; }
+
+# grove, with stdout in $OUT and stderr in $ERR — the split is part of the
+# contract: rows go to stdout, everything a human reads to stderr. Leading
+# VAR=val arguments become the child's environment. </dev/null and a timeout so
+# a picker path that slipped in waits for nothing and hangs nothing.
+g() {
+  local -a e=()
+  while [ $# -gt 0 ]; do case "$1" in *=*) e+=("$1"); shift ;; *) break ;; esac; done
+  [ "$VERBOSE" = 1 ] && printf '        $ %s grove %s\n' "${e[*]-}" "$*"
+  OUT=$(cd "$CWD" && timeout "$TMO" env ${e[@]+"${e[@]}"} "$GROVE" "$@" 2>"$ERRF" </dev/null)
+  RC=$?
+  ERR=$(cat "$ERRF")
+  [ "$RC" = 124 ] && ERR="$ERR (timed out)"
+  return 0
+}
+
+line1() { printf '%s\n' "$1" | sed -n 1p; }
+row()   { printf '%s\n' "$OUT" | awk -v s="$1" '$1 == s'; }   # one -l row by slug
+
+# --- scratch repos -----------------------------------------------------------
+R1=$SB/r1 R2=$SB/r2 W1=$SB/r1/.claude/worktrees BASE1='' BASE2=''
+
+newrepo() {
+  mkdir -p "$1" && git -C "$1" init -q
+  git -C "$1" config user.name grove-test
+  git -C "$1" config user.email grove-test@localhost
+  git -C "$1" config commit.gpgsign false
+  : > "$1/README" && git -C "$1" add README && git -C "$1" commit -qm init
+  git -C "$1" branch -M main
+  git -C "$1" rev-parse HEAD
+}
+
+wt()  { git -C "$1" worktree add -q -b "grove/$2" "$1/.claude/worktrees/$2"; }
+fwt() { git -C "$1" worktree add -q -b "worktree-$2" "$1/.claude/worktrees/$2"; }
+
+# Back to one main checkout on its first commit, no other branch, no session.
+reset_repo() {
+  local r=$1 base=$2 p b
+  git -C "$r" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}' | tail -n +2 \
+    | while IFS= read -r p; do
+        git -C "$r" worktree unlock "$p" >/dev/null 2>&1
+        git -C "$r" worktree remove --force "$p" >/dev/null 2>&1 || rm -rf "$p"
+      done
+  git -C "$r" worktree prune
+  git -C "$r" checkout -q main 2>/dev/null
+  git -C "$r" reset -q --hard "$base"
+  git -C "$r" clean -qfd
+  git -C "$r" for-each-ref --format='%(refname:short)' refs/heads \
+    | while read -r b; do [ "$b" = main ] || git -C "$r" branch -D "$b" >/dev/null 2>&1; done
+}
+
+# --- tmux fixtures -----------------------------------------------------------
+mksess() {  # name, cwd, [state] — a session grove will read but never own
+  tmux new-session -d -s "$1" -c "$2" 'sleep 86400'
+  [ $# -ge 3 ] && [ -n "$3" ] && tmux set-option -t "=$1:" -q @grove_state "$3"
+  return 0
+}
+ksess()      { tmux kill-session -t "=$1" 2>/dev/null; return 0; }
+sess_alive() { tmux has-session -t "=$1" 2>/dev/null; }
+undrive() {  # detach every client first: a stuck one wedges the server
+  tmux list-clients -F '#{client_name}' 2>/dev/null \
+    | while read -r c; do tmux detach-client -t "$c" 2>/dev/null; done
+  ksess driver
+}
+wipe_sessions() {
+  local n
+  tmux list-sessions -F '#{session_name}' 2>/dev/null \
+    | while read -r n; do case "$n" in anchor) ;; *) tmux kill-session -t "=$n" ;; esac; done
+  return 0
+}
+
+# --- git-state postconditions ------------------------------------------------
+snap()  { git -C "$1" worktree list --porcelain | grep '^worktree '
+          git -C "$1" for-each-ref --format='%(refname)' refs/heads; }
+same()  { eq "$1 — repo untouched" "$(snap "$2")" "$3"; }
+
+proc_start() { awk '{ sub(/^[0-9]+ \(.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null; }
+lock()       { git -C "$1" worktree lock --reason "$3" "$2"; }
+
+# =============================================================================
+t_state() {
+  group 'hot path: --state (runs as a hook, must never fail)'
+  local pane
+  CWD=$HOME
+  g --state working
+  rcis 'no $TMUX: exit 0' 0
+  eq   'no $TMUX: silent' "$OUT$ERR" ''
+  g "TMUX=/nonexistent/sock,1,0" TMUX_PANE=%0 --state working
+  rcis 'dead server: still exit 0' 0
+  pane=$(tmux display-message -p -t '=anchor:' '#{pane_id}')
+  g "TMUX=$SOCK" "TMUX_PANE=$pane" --state waiting
+  rcis 'stamping: exit 0' 0
+  eq 'stamps @grove_state' "$(tmux display-message -p -t '=anchor:' '#{@grove_state}')" waiting
+  case $(tmux display-message -p -t '=anchor:' '#{@grove_state_at}') in
+    ''|*[!0-9]*) bad 'stamps @grove_state_at' ;; *) ok 'stamps @grove_state_at' ;;
+  esac
+  g "TMUX=$SOCK" "TMUX_PANE=$pane" --state
+  eq 'no argument means idle' "$(tmux display-message -p -t '=anchor:' '#{@grove_state}')" idle
+  g "TMUX=$SOCK" TMUX_PANE=%99999 --state working
+  rcis 'bad pane: still exit 0' 0
+  tmux set-option -t '=anchor:' -u @grove_state
+}
+
+t_help() {
+  group 'help, hooks, unknown flags'
+  CWD=$HOME
+  g -h
+  rcis '-h: exit 0' 0
+  has   '-h: the leading comment block' "$(line1 "$OUT")" 'grove — launch Claude Code'
+  has   '-h: the whole block'           "$OUT" 'grove -k <slug>'
+  hasnt '-h: stops at the first non-comment' "$OUT" 'set -euo pipefail'
+  hasnt '-h: strips the # prefix'            "$(line1 "$OUT")" '#'
+  g --hooks
+  rcis '--hooks: exit 0' 0
+  has '--hooks: UserPromptSubmit' "$OUT" 'UserPromptSubmit'
+  has '--hooks: Notification'     "$OUT" 'permission_prompt'
+  has '--hooks: PreToolUse'       "$OUT" 'AskUserQuestion'
+  has '--hooks: Stop'             "$OUT" '--state idle'
+  g --nonsense
+  rcis 'unknown flag: exit 1' 1
+  has  'unknown flag: names --' "$ERR" 'use -- to pass flags to claude'
+  g -l
+  rcis 'outside a repo: -l refuses' 1
+  has  'outside a repo: -l says why' "$ERR" 'not inside a git repository'
+  g -s
+  rcis 'outside a repo: -s works' 0
+  g adopt x
+  has 'outside a repo: adopt refuses' "$ERR" 'not inside a git repository'
+}
+
+t_rows() {
+  group 'row contract: --_rows, -l, the tab bar, colour'
+  local f bad_fields l1
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  wt "$R1" wt1; fwt "$R1" wt9
+  CWD=$R1
+
+  g --_rows worktrees
+  l1=$(line1 "$OUT")
+  has   'tab bar is line 1'        "$l1" 'worktrees'
+  has   'tab bar names both tabs'  "$l1" 'sessions'
+  hasnt 'tab bar holds no tabs'    "$l1" "$(printf '\t')"
+  bad_fields=$(printf '%s\n' "$OUT" | tail -n +2 | awk -F'\t' 'NF != 4 { print NR }' | tr '\n' ' ')
+  eq 'every row is 4 tab-delimited fields' "$bad_fields" ''
+  eq 'last row is %new%'      "$(printf '%s\n' "$OUT" | tail -1 | cut -f3)" '%new%'
+  eq "%new%'s session is '-'" "$(printf '%s\n' "$OUT" | tail -1 | cut -f2)" '-'
+  eq 'rows carry their tab name' \
+     "$(printf '%s\n' "$OUT" | tail -n +2 | cut -f4 | sort -u | tr '\n' ' ')" 'worktrees '
+
+  g --_rows sessions
+  has   'sessions tab bar'      "$(line1 "$OUT")" 'sessions'
+  hasnt 'sessions tab: no %new%' "$OUT" '%new%'
+
+  g -l
+  rcis '-l: exit 0' 0
+  hasnt '-l: never shows %new%'   "$OUT" '%new%'
+  hasnt '-l: display field only'  "$OUT" "$(printf '\t')"
+  has   '-l: lists the worktree'  "$OUT" 'wt1'
+
+  f=$SB/note
+  printf 'removed wt7' > "$f"
+  g "GROVE_NOTE=$f" --_rows worktrees
+  has 'GROVE_NOTE rides the header line' "$(line1 "$OUT")" 'removed wt7'
+  eq  'GROVE_NOTE is emptied by the reload that showed it' "$(cat "$f")" ''
+  g "GROVE_NOTE=$f" --_rows worktrees
+  hasnt 'one action, one showing' "$(line1 "$OUT")" 'removed wt7'
+
+  g GROVE_ANSI=1 --_rows worktrees
+  has   'GROVE_ANSI=1 forces colour down a pipe' "$OUT" "$(printf '\033')"
+  g --_rows worktrees
+  hasnt 'a bare pipe gets no colour' "$OUT" "$(printf '\033')"
+  g GROVE_ANSI=1 NO_COLOR=1 --_rows worktrees
+  hasnt 'NO_COLOR wins'              "$OUT" "$(printf '\033')"
+  g GROVE_ANSI=1 TERM=dumb --_rows worktrees
+  hasnt 'TERM=dumb wins'             "$OUT" "$(printf '\033')"
+
+  CWD=$HOME
+  g --_rows worktrees
+  hasnt 'outside a repo: no worktrees tab' "$(line1 "$OUT")" 'worktrees'
+  has   'outside a repo: sessions tab'     "$(line1 "$OUT")" 'sessions'
+  hasnt 'outside a repo: no %new%'         "$OUT" '%new%'
+  reset_repo "$R1" "$BASE1"
+}
+
+t_markers() {
+  group 'what a row says: branch, dirt, drift, status, staleness'
+  local v
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  wt "$R1" wt1
+  CWD=$R1
+
+  g -l
+  has   'clean worktree names its branch' "$OUT" 'grove/wt1'
+  has   'no session reads free'           "$OUT" 'free'
+  hasnt 'clean: no dirt marker'           "$OUT" '~'
+  hasnt 'clean: no drift marker'          "$OUT" '⇣'
+
+  : > "$W1/wt1/scratch"
+  g -l; has 'an untracked file counts as dirty' "$OUT" '~1'
+  rm "$W1/wt1/scratch"
+
+  git -C "$R1" commit -q --allow-empty -m on-main
+  g -l; has 'main moved on: ⇣' "$OUT" '⇣1'
+  git -C "$W1/wt1" commit -q --allow-empty -m mine
+  g -l; has 'both moved: ⇡⇣'   "$OUT" '⇡1⇣1'
+
+  git -C "$R1" checkout -q --detach
+  g -l; hasnt 'detached main checkout: no drift marker at all' "$OUT" '⇣'
+  git -C "$R1" checkout -q main
+
+  fwt "$R1" wt9
+  g -l
+  has 'a foreign worktree lists as unadopted' "$OUT" 'unadopted'
+  has 'and shows the branch it is on'         "$OUT" 'worktree-wt9'
+
+  mksess grove-r1-wt1 "$W1/wt1" waiting
+  g -l; has 'waiting reads "needs you"' "$OUT" 'needs you'
+  tmux set-option -t '=grove-r1-wt1:' -q @grove_state idle
+  g -l; has 'idle reads "done"'         "$OUT" 'done'
+  tmux set-option -t '=grove-r1-wt1:' -q @grove_state working
+  g -l; has 'working reads "working"'   "$OUT" 'working'
+  tmux set-option -t '=grove-r1-wt1:' -u @grove_state
+  g -l; has 'no state reads "live"'     "$OUT" 'live'
+
+  # Rank, not name, is the sort: a session needing you floats, an unadopted row
+  # sinks, and the synthetic + new stays last however the rest shuffles.
+  wt "$R1" wt2
+  tmux set-option -t '=grove-r1-wt1:' -q @grove_state waiting
+  g --_rows worktrees
+  eq 'needs-you first, unadopted second-last, + new last' \
+     "$(printf '%s\n' "$OUT" | tail -n +2 | awk -F'\t' '{ print $1 }' | awk '{ printf "%s ", $1 }')" \
+     'wt1 wt2 wt9 + '
+  tmux set-option -t '=grove-r1-wt1:' -u @grove_state
+
+  tmux new-session -d -s driver -c "$HOME" 'TMUX= tmux attach -t =grove-r1-wt1'
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ "$(tmux display-message -p -t '=grove-r1-wt1:' '#{session_attached}')" = 0 ] || break
+    sleep 0.3
+  done
+  g -l; has 'an attached session says so' "$OUT" '(attached)'
+  undrive
+
+  g -l
+  hasnt 'an unstamped session is never stale' "$OUT" '↑'
+  tmux set-option -t '=grove-r1-wt1:' -q @grove_claude 'yesterday'
+  g -l; has 'a stamp that no longer matches is stale' "$OUT" '↑'
+  mkdir -p "$SB/bin"; printf '#!/bin/sh\n' > "$SB/bin/2.1.2"; chmod +x "$SB/bin/2.1.2"
+  g "GROVE_CLAUDE=$SB/bin/2.1.2" -l
+  has 'the marker names the version it would restart onto' "$OUT" '↑2.1.2'
+
+  # sessions tab
+  wt "$R2" wt1
+  mksess grove-r2-wt1 "$R2/.claude/worktrees/wt1" idle
+  git -C "$R2" commit -q --allow-empty -m on-main-2
+  g -s
+  has 'sessions tab names repo/slug'  "$OUT" 'r1/wt1'
+  has 'sessions tab spans repos'      "$OUT" 'r2/wt1'
+  has "another repo's drift is read from that path, not \$main_root" "$OUT" '⇣1'
+  case $(printf '%s\n' "$OUT" | grep r1/wt1) in
+    *[0-9]s*|*[0-9]m*) ok 'sessions tab shows an age' ;;
+    *) bad 'sessions tab shows an age' "$OUT" ;;
+  esac
+  CWD=$HOME
+  g -s; has 'the sessions tab works outside any repo' "$OUT" 'r1/wt1'
+
+  rm -rf "$W1/wt1"
+  g -s; has 'a session whose directory went away reads gone' "$OUT" 'gone'
+
+  wipe_sessions
+  reset_repo "$R1" "$BASE1"; reset_repo "$R2" "$BASE2"
+}
+
+t_killkey() {
+  group "the pickers' kill key: --_kill"
+  local i
+  wipe_sessions
+  CWD=$HOME
+  mksess not-groves "$HOME"
+  g --_kill not-groves
+  rcis 'a name that is not grove-*: exit 0' 0
+  if sess_alive not-groves; then ok 'and the session survives'
+  else bad 'and the session survives'; fi
+  ksess not-groves
+
+  mksess grove-r1-wt1 "$HOME"
+  g --_kill grove-r1-wt1
+  if sess_alive grove-r1-wt1; then bad 'a grove session dies'
+  else ok 'a grove session dies'; fi
+
+  g --_kill grove-nothing-here
+  rcis 'an already-dead session: exit 0' 0
+
+  # Refusing its own session needs grove to run *inside* one.
+  rm -f "$SB/selfkill.done"
+  tmux new-session -d -s grove-r1-self -c "$HOME" \
+    "$GROVE --_kill grove-r1-self; : > $SB/selfkill.done; sleep 86400"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -e "$SB/selfkill.done" ] && break
+    sleep 0.3
+  done
+  if [ ! -e "$SB/selfkill.done" ]; then bad 'a picker cannot kill its own session' 'never ran'
+  elif sess_alive grove-r1-self; then ok 'a picker cannot kill its own session'
+  else bad 'a picker cannot kill its own session' 'it died'; fi
+  wipe_sessions
+}
+
+t_adopt() {
+  group 'adopt: the rename, and every refusal'
+  local before
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  CWD=$R1
+
+  fwt "$R1" wt9
+  g adopt wt9
+  rcis 'adopt: exit 0' 0
+  has 'adopt says what it renamed' "$ERR" 'adopted wt9'
+  eq  'the branch is now grove/<slug>' \
+      "$(git -C "$W1/wt9" symbolic-ref --short HEAD)" 'grove/wt9'
+  g -l; hasnt 'and the row is no longer unadopted' "$OUT" 'unadopted'
+  g adopt wt9
+  rcis 're-adopting is a no-op' 0
+  eq  'and says nothing' "$ERR" ''
+
+  # Every refusal below must leave the repo exactly as it was — a half-done
+  # rename is the failure that matters, because -k would then miss the commits.
+  before=$(snap "$R1")
+  g adopt .
+  has  'refuses . — that is the main checkout' "$ERR" 'main checkout'
+  same 'adopt .' "$R1" "$before"
+  g adopt .claude
+  has  'refuses a plain directory in the repo' "$ERR" 'main checkout'
+  same 'adopt .claude' "$R1" "$before"
+  g adopt "$W1"
+  has  'refuses $wt_base itself' "$ERR" 'main checkout'
+  same 'adopt $wt_base' "$R1" "$before"
+  g adopt "$R2"
+  has  'refuses a path in another repo' "$ERR" "is not inside"
+  same 'adopt another repo' "$R1" "$before"
+  g adopt nothing-here
+  has  'refuses a name with no worktree' "$ERR" 'no such worktree'
+  same 'adopt <unknown>' "$R1" "$before"
+
+  fwt "$R1" wt8
+  git -C "$W1/wt8" checkout -q --detach
+  before=$(snap "$R1")
+  g adopt wt8
+  has  'refuses a detached HEAD' "$ERR" 'detached HEAD'
+  same 'adopt <detached>' "$R1" "$before"
+
+  git -C "$W1/wt8" checkout -q -B worktree-wt8
+  git -C "$R1" branch grove/wt8
+  before=$(snap "$R1")
+  g adopt wt8
+  has  'refuses when grove/<slug> is taken' "$ERR" 'already exists'
+  same 'adopt <branch taken>' "$R1" "$before"
+  git -C "$R1" branch -D grove/wt8 >/dev/null
+
+  mksess other-tool "$W1/wt8"
+  before=$(snap "$R1")
+  g adopt wt8
+  has  'refuses a worktree another session is sitting in' "$ERR" 'already sitting in'
+  same 'adopt <busy>' "$R1" "$before"
+  ksess other-tool
+
+  mkdir -p "$W1/wt8/sub"
+  g adopt "$W1/wt8/sub"
+  eq 'a path inside a worktree adopts that worktree' \
+     "$(git -C "$W1/wt8" symbolic-ref --short HEAD)" 'grove/wt8'
+
+  reset_repo "$R1" "$BASE1"
+}
+
+t_remove() {
+  group "the pickers' remove key: --_remove"
+  local before
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  CWD=$HOME
+
+  wt "$R1" wt1
+  mksess grove-r1-wt1 "$W1/wt1"
+  g --_remove "$W1/wt1" grove-r1-wt1
+  has 'clean and merged: removed'   "$ERR" 'removed wt1'
+  if [ -d "$W1/wt1" ]; then bad 'the directory is gone'; else ok 'the directory is gone'; fi
+  hasnt 'the branch is gone too' "$(git -C "$R1" branch --format='%(refname:short)')" 'grove/wt1'
+  if sess_alive grove-r1-wt1; then bad 'and the session named in argv dies'
+  else ok 'and the session named in argv dies'; fi
+
+  # Each refusal gets its own worktree: the first matching test wins, so they
+  # cannot share one.
+  wt "$R1" wt2; : > "$W1/wt2/scratch"
+  wt "$R1" wt3; git -C "$W1/wt3" commit -q --allow-empty -m mine
+  fwt "$R1" wt4
+  wt "$R1" wt5; git -C "$W1/wt5" checkout -q --detach
+  wt "$R1" wt6
+  before=$(snap "$R1")
+
+  g --_remove "$W1/wt2" -
+  has 'an untracked file refuses'  "$ERR" 'uncommitted file'
+  has 'and points at -k'           "$ERR" 'grove -k wt2'
+  g --_remove "$W1/wt3" -
+  has 'a commit of its own refuses' "$ERR" "commit(s) of its own"
+  g --_remove "$W1/wt4" -
+  has 'unadopted refuses on the branch, not the path' "$ERR" "not grove's yet"
+  g --_remove "$W1/wt5" -
+  has 'a detached HEAD refuses'    "$ERR" 'detached HEAD'
+  g --_remove '%new%' -
+  has 'the synthetic new row refuses' "$ERR" 'nothing to remove'
+  g --_remove "$R1" -
+  has 'the main checkout refuses'  "$ERR" 'main checkout'
+  g --_remove "$SB/gone" -
+  has 'a directory already gone refuses' "$ERR" 'already gone'
+  mkdir -p "$HOME/plain"
+  g --_remove "$HOME/plain" -
+  has 'a path in no repo at all refuses' "$ERR" 'not a git worktree'
+  CWD=$W1/wt6
+  g --_remove "$W1/wt6" -
+  has 'standing in it refuses' "$ERR" 'where you are standing'
+  CWD=$HOME
+  same 'every refusal above' "$R1" "$before"
+
+  if [ -d /proc ]; then
+    lock "$R1" "$W1/wt6" "claude session wt6 (pid 999999 start 1)"
+    g --_remove "$W1/wt6" -
+    has 'a stale lock clears itself and the worktree goes' "$ERR" 'removed wt6'
+
+    wt "$R1" wt7
+    lock "$R1" "$W1/wt7" "claude session wt7 (pid $$ start $(proc_start $$))"
+    before=$(snap "$R1")
+    g --_remove "$W1/wt7" -
+    has  'a live lock refuses' "$ERR" 'locked by a running process'
+    same 'a live lock' "$R1" "$before"
+
+    git -C "$R1" worktree unlock "$W1/wt7"
+    lock "$R1" "$W1/wt7" "claude session wt7 (pid $$ start 1)"
+    g --_remove "$W1/wt7" -
+    has 'a recycled pid reads as stale' "$ERR" 'removed wt7'
+
+    wt "$R1" wt8
+    git -C "$R1" worktree lock "$W1/wt8"
+    before=$(snap "$R1")
+    g --_remove "$W1/wt8" -
+    has  'a lock with no reason is unattributable, so it refuses' "$ERR" 'locked by a running'
+    same 'a bare lock' "$R1" "$before"
+    git -C "$R1" worktree unlock "$W1/wt8"
+  else
+    skip 'lock states' 'no /proc'
+  fi
+
+  # Repo-agnostic: nothing in safe_remove reads $main_root, which is what lets a
+  # sessions-tab row from another repo be removed at all.
+  wt "$R2" wtx
+  CWD=$R2
+  g --_remove "$W1/wt8" -
+  has 'removes a worktree of another repo entirely' "$ERR" 'removed wt8'
+
+  CWD=$HOME
+  wt "$R1" wt9
+  printf 'stale' > "$SB/note"
+  g "GROVE_NOTE=$SB/note" --_remove "$W1/wt9" -
+  eq 'with $GROVE_NOTE set, nothing goes to stderr' "$ERR" ''
+  has 'the outcome lands in the note file instead' "$(cat "$SB/note")" 'removed wt9'
+
+  wipe_sessions
+  reset_repo "$R1" "$BASE1"; reset_repo "$R2" "$BASE2"
+}
+
+t_kill() {
+  group '-k: the one path that may destroy work'
+  local before out
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  CWD=$R1
+
+  wt "$R1" wt1
+  mksess grove-r1-wt1 "$W1/wt1"
+  g -k wt1
+  rcis 'clean: exit 0' 0
+  has  'clean: removed' "$ERR" 'removed wt1'
+  if sess_alive grove-r1-wt1; then bad 'and the session goes with it'
+  else ok 'and the session goes with it'; fi
+  eq 'and the main checkout is left clean' "$(git -C "$R1" status --porcelain)" ''
+
+  for a in a/b . .. ''; do
+    g -k "$a"
+    case "$ERR" in
+      *'invalid slug'*|*'usage:'*) ok "-k refuses the slug [$a]" ;;
+      *) bad "-k refuses the slug [$a]" "$ERR" ;;
+    esac
+  done
+  g -k nothing-here
+  has '-k on an unknown slug' "$ERR" 'no such worktree'
+  g -k wt1 -k wt2
+  has '-k takes one slug' "$ERR" 'usage:'
+
+  wt "$R1" wt2; : > "$W1/wt2/scratch"
+  before=$(snap "$R1")
+  if setsid -w true 2>/dev/null; then
+    out=$(cd "$R1" && setsid -w timeout "$TMO" "$GROVE" -k wt2 </dev/null 2>&1)
+    has  'dirty with no tty and no -f: aborts' "$out" 'aborted'
+    same 'the aborted -k' "$R1" "$before"
+    out=$(cd "$R1" && setsid -w timeout "$TMO" "$GROVE" -k wt2 -f </dev/null 2>&1)
+    has  'dirty with -f: warns anyway' "$out" 'uncommitted file'
+    has  'dirty with -f: says why it went ahead' "$out" '-f given'
+    has  'dirty with -f: removed' "$out" 'removed wt2'
+  else
+    skip 'the no-tty paths' 'no setsid -w'
+  fi
+
+  wt "$R1" wt3; git -C "$W1/wt3" commit -q --allow-empty -m orphan
+  g -k wt3 -f
+  has 'an unmerged commit is counted' "$ERR" 'commit(s) not merged anywhere else'
+  has 'and listed, so the warning is checkable' "$ERR" 'orphan'
+  has 'then removed under -f' "$ERR" 'removed wt3'
+
+  wt "$R1" wt4
+  git -C "$W1/wt4" commit -q --allow-empty -m merged
+  git -C "$R1" merge -q --ff-only grove/wt4 2>/dev/null || git -C "$R1" merge -q grove/wt4
+  g -k wt4
+  hasnt 'a commit main already holds is not a risk' "$ERR" 'not merged'
+  has   'so -k never prompts about it' "$ERR" 'removed wt4'
+  git -C "$R1" reset -q --hard "$BASE1"
+
+  if [ -d /proc ]; then
+    wt "$R1" wt5
+    lock "$R1" "$W1/wt5" "claude session wt5 (pid $$ start $(proc_start $$))"
+    before=$(snap "$R1")
+    g -k wt5
+    rcis 'a live lock refuses' 1
+    has  'a live lock names the process' "$ERR" 'locked by a running process'
+    g -k wt5 -f
+    has  '-f is not consent to pull files from under a running claude' \
+         "$ERR" 'locked by a running process'
+    same 'the refused -k' "$R1" "$before"
+    git -C "$R1" worktree unlock "$W1/wt5"
+
+    lock "$R1" "$W1/wt5" "claude session wt5 (pid 999999 start 1)"
+    g -k wt5
+    has 'a stale lock needs no flag' "$ERR" 'removed wt5'
+  else
+    skip 'the -k lock states' 'no /proc'
+  fi
+
+  if command -v script >/dev/null; then
+    wt "$R1" wt6; : > "$W1/wt6/scratch"
+    before=$(snap "$R1")
+    out=$(printf 'n\n' | script -qec "cd $R1 && $GROVE -k wt6" /dev/null 2>&1)
+    has  'the prompt asks'      "$out" 'delete it anyway?'
+    same 'answering n'          "$R1" "$before"
+    out=$(printf 'y\n' | script -qec "cd $R1 && $GROVE -k wt6" /dev/null 2>&1)
+    has  'answering y removes it' "$out" 'removed wt6'
+  else
+    skip 'the y/N prompt' 'no script(1)'
+  fi
+
+  wipe_sessions
+  reset_repo "$R1" "$BASE1"
+}
+
+# launch() ends in attach, which has no terminal here and fails — on purpose:
+# everything worth checking (the new worktree, the fast-forward, the session)
+# has already happened by then, and a terminal it could attach to would block
+# the run instead. So these read git and tmux state, never grove's exit status.
+t_launch() {
+  group 'launch: a new worktree, and the fast-forward on open'
+  reset_repo "$R1" "$BASE1"; wipe_sessions
+  CWD=$R1
+  if [ "$HAVE_E" = 0 ]; then skip 'launch' 'tmux is older than 3.2 (new-session -e)'; return 0; fi
+
+  g -n
+  eq 'the first worktree branches grove/wt1' \
+     "$(git -C "$R1" branch --list --format='%(refname:short)' 'grove/wt1')" 'grove/wt1'
+  if [ -d "$W1/wt1" ]; then ok 'at .claude/worktrees/<slug>'
+  else bad 'at .claude/worktrees/<slug>' "$ERR"; fi
+  if sess_alive grove-r1-wt1; then ok 'in a grove-<repo>-<slug> session'
+  else bad 'in a grove-<repo>-<slug> session' "$ERR"; fi
+  eq 'and git never sees it' "$(git -C "$R1" status --porcelain)" ''
+  has 'info/exclude keeps it out of the way' \
+      "$(cat "$R1/.git/info/exclude")" '**/.claude/worktrees/'
+  ksess grove-r1-wt1
+
+  git -C "$R1" branch grove/wt2
+  g -n
+  if [ -d "$W1/wt3" ]; then ok 'the slug skips a branch that already exists'
+  else bad 'the slug skips a branch that already exists' "$ERR"; fi
+  ksess grove-r1-wt3
+  git -C "$R1" worktree remove --force "$W1/wt3"
+  git -C "$R1" branch -D grove/wt2 grove/wt3 >/dev/null
+
+  # The fast-forward, and each guard that holds it back.
+  git -C "$R1" commit -q --allow-empty -m on-main
+  CWD=$W1/wt1
+  g
+  has 'clean and behind: fast-forwarded on open' "$ERR" 'fast-forwarded wt1 to main (+1)'
+  CWD=$R1
+  g -l
+  hasnt 'and the marker is gone' "$(row wt1)" '⇣'
+  ksess grove-r1-wt1
+
+  : > "$W1/wt1/scratch"
+  git -C "$R1" commit -q --allow-empty -m on-main-again
+  CWD=$W1/wt1
+  g
+  hasnt 'an untracked file holds the sync back' "$ERR" 'fast-forwarded'
+  CWD=$R1
+  g -l; has 'and the row says why' "$(row wt1)" '~1 ⇣1'
+  rm "$W1/wt1/scratch"; ksess grove-r1-wt1
+
+  git -C "$W1/wt1" commit -q --allow-empty -m mine
+  CWD=$W1/wt1
+  g
+  hasnt 'a commit of its own holds it back too' "$ERR" 'fast-forwarded'
+  CWD=$R1
+  g -l; has 'and that row too' "$(row wt1)" '⇡1⇣1'
+  ksess grove-r1-wt1
+
+  git -C "$R1" reset -q --hard "$BASE1"
+  git -C "$W1/wt1" reset -q --hard "$BASE1"
+  git -C "$R1" commit -q --allow-empty -m on-main
+  mksess grove-r1-wt1 "$W1/wt1" idle
+  CWD=$W1/wt1
+  g
+  hasnt 'a live session is attached, never synced' "$ERR" 'fast-forwarded'
+  CWD=$R1
+  g -l; has 'so the marker stays' "$(row wt1)" '⇣1'
+  ksess grove-r1-wt1
+
+  git -C "$R1" checkout -q --detach
+  CWD=$W1/wt1
+  g
+  hasnt 'a detached main checkout has no ref to sync onto' "$ERR" 'fast-forwarded'
+  CWD=$R1
+  git -C "$R1" checkout -q main
+  ksess grove-r1-wt1
+
+  # Opening an unadopted worktree adopts it on the way in.
+  fwt "$R1" wt9
+  CWD=$W1/wt9
+  g
+  has 'opening an unadopted worktree adopts it' "$ERR" 'adopted wt9'
+  eq  'so launch names the session after grove/<slug>' \
+      "$(git -C "$W1/wt9" symbolic-ref --short HEAD)" 'grove/wt9'
+  if sess_alive grove-r1-wt9; then ok 'and the session is grove’s'
+  else bad 'and the session is grove’s' "$ERR"; fi
+  CWD=$R1
+  ksess grove-r1-wt9
+
+  # $GROVE_ROOT still puts worktrees out of the repo; the branch is what marks
+  # them as grove's, so the listing finds them anyway.
+  g "GROVE_ROOT=$SB/oldroot" -n
+  if [ -d "$SB/oldroot/r1/wt2" ]; then ok '$GROVE_ROOT restores the out-of-repo layout'
+  else bad '$GROVE_ROOT restores the out-of-repo layout' "$ERR"; fi
+  g -l
+  has 'and it lists with the rest' "$OUT" 'wt2'
+  ksess grove-r1-wt2
+
+  wipe_sessions
+  reset_repo "$R1" "$BASE1"
+  rm -rf "$SB/oldroot"
+}
+
+# =============================================================================
+ALL='state help rows markers killkey adopt remove kill launch'
+
+usage() { printf 'usage: tests/run [-v] [-l] [group...]\n  groups: %s\n' "$ALL"; }
+
+want=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -v) VERBOSE=1; shift ;;
+    -l) printf '%s\n' $ALL; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage >&2; exit 2 ;;
+    *)  want="$want $1"; shift ;;
+  esac
+done
+[ -n "$want" ] || want=$ALL
+
+BASE1=$(newrepo "$R1") || exit 2
+BASE2=$(newrepo "$R2") || exit 2
+
+printf 'grove: %s\ntmux:  %s (%s)\nscratch: %s\n' \
+  "$GROVE" "$(tmux -V)" "$TMUX_TMPDIR" "$SB"
+
+for name in $want; do
+  case " $ALL " in *" $name "*) ;; *) printf 'no such group: %s\n' "$name" >&2; exit 2 ;; esac
+  "t_$name"
+done
+
+printf '\n%d passed, %d failed' "$PASS" "$FAIL"
+[ "$SKIPPED" -gt 0 ] && printf ', %d skipped' "$SKIPPED"
+printf '\n'
+[ "$FAIL" -eq 0 ]
