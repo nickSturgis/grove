@@ -7,6 +7,7 @@
 #   grove -l          list this repo's worktrees and their state
 #   grove -s          list every live grove session, in any repo
 #   grove -k <slug>   kill the session and remove the worktree
+#   grove adopt <x>   take over a worktree another tool left behind
 #   grove --hooks     print the Claude Code hook config for live status
 #   grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 #
@@ -29,6 +30,12 @@
 #
 # Worktrees live at <repo>/.claude/worktrees/<slug>, where Claude Code puts its
 # own, so /resume finds their sessions. $GROVE_ROOT restores the old location.
+#
+# Worktrees another tool left in that directory — `claude -w` branches them
+# worktree-<name> — list as "unadopted". Opening one renames its branch to
+# grove/<name>, which is all it takes to make it an ordinary grove worktree;
+# `grove adopt <name>` does the rename without opening it. Claude Code stops
+# finding that worktree by name afterwards, so tidying it becomes grove's job.
 
 set -euo pipefail
 
@@ -245,6 +252,99 @@ grove_worktrees() {
       done
 }
 
+# The other side of that test: worktrees sitting in the same directory that are
+# not grove's, which is what `claude -w` leaves behind. Listed so they can be
+# adopted — never counted as grove's until they are, because the branch is
+# still the only ownership test. Scoped to $wt_base, so a long-lived checkout
+# parked elsewhere in the repo is never one keystroke away from a rename.
+foreign_worktrees() {
+  [ -n "$wt_base" ] && [ -d "$wt_base" ] || return 0
+  git -C "$main_root" worktree list --porcelain 2>/dev/null \
+    | awk '/^worktree /{p=substr($0,10)}
+           /^branch / && $0 !~ /^branch refs\/heads\/grove\//{print p}' \
+    | while IFS= read -r p; do
+        case "$p" in
+          "$wt_base"/*) if [ -d "$p" ]; then printf '%s\n' "$p"; fi ;;
+        esac
+      done
+}
+
+adoptable() {  # path -> would opening this row adopt it?
+  local p
+  [ "$in_repo" = 1 ] && [ -n "${1:-}" ] || return 1
+  while IFS= read -r p; do
+    [ "$p" = "$1" ] && return 0
+  done < <(foreign_worktrees)
+  return 1
+}
+
+# Skips the session grove is running in: a terminal you cd'd into the worktree
+# yourself is not something using it, and refusing there would block the whole
+# point — running grove from inside an unadopted worktree.
+session_at() {  # path -> another tmux session already sitting in it, or ''
+  local n me=''
+  if [ -n "${TMUX:-}" ]; then
+    me=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+  fi
+  for n in "${!S_PATH[@]}"; do
+    if [ "$n" != "$me" ] && [ "${S_PATH[$n]}" = "$1" ]; then
+      printf '%s' "$n"; return 0
+    fi
+  done
+  return 0
+}
+
+# Adoption is the branch rename and nothing else: everything else about a
+# foreign worktree is already the right shape. Rename, never create — a
+# surviving worktree-<name> would still hold the commits, so orphan_count's
+# --exclude=grove/<slug> --branches would find them on the old name, report
+# zero, and let -k delete them without the prompt that is its only safety net.
+# For the same reason the slug is forced to the directory's basename:
+# path_for_slug matches on basename while orphan_count and cmd_kill build
+# refs/heads/grove/<slug>, and a mismatch is that silent -k again.
+# Cheap and reversible, which is what makes opening a row enough to trigger it.
+adopt_worktree() {
+  local p="$1" slug old busy
+  slug=$(basename "$p")
+  old=$(git -C "$p" symbolic-ref --short -q HEAD) \
+    || die "$slug is on a detached HEAD — no branch to rename"
+  case "$old" in grove/*) return 0 ;; esac
+  if git -C "$main_root" show-ref --verify --quiet "refs/heads/grove/$slug"; then
+    die "branch grove/$slug already exists — rename it before adopting $slug"
+  fi
+  # A foreign worktree has no grove session to ask, so this is the only liveness
+  # signal there is: it catches `claude --tmux -w`, and misses a foreground
+  # `claude -w`, which leaves no trace anywhere.
+  busy=$(session_at "$p")
+  [ -n "$busy" ] && die "session $busy is already sitting in $slug"
+  git -C "$main_root" branch -m "$old" "grove/$slug" \
+    || die "could not rename $old to grove/$slug"
+  printf 'grove: adopted %s — %s is now grove/%s\n' "$slug" "$old" "$slug" >&2
+}
+
+# `grove adopt` takes any worktree of this repo, not just the ones the picker
+# offers: the picker's $wt_base scope is there to keep the keystroke safe, and
+# naming a path is explicit enough to stand on its own.
+cmd_adopt() {
+  local arg="${1:-}" p common top
+  [ -n "$arg" ] || die "usage: grove adopt <name|path>"
+  if   [ -n "$wt_base" ] && [ -d "$wt_base/$arg" ]; then p="$wt_base/$arg"
+  elif [ -d "$arg" ];                                then p="$arg"
+  else die "no such worktree: $arg"
+  fi
+  # --git-common-dir can come back relative, so resolve it from inside $p.
+  common=$(git -C "$p" rev-parse --git-common-dir 2>/dev/null) \
+    && common=$(cd "$p" && cd "$common" && pwd -P) || common=''
+  [ "$common" = "$git_common" ] || die "$arg is not inside $repo"
+  # Adopt the worktree $p *belongs to*, never $p. A path that merely sits in
+  # the repo — `.`, or $wt_base itself — resolves to the main checkout, and
+  # renaming from there renames main. It did, once.
+  top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) \
+    && top=$(cd "$top" && pwd -P) || die "$arg is not a worktree of $repo"
+  [ "$top" != "$main_root" ] || die "$arg is the main checkout, not a worktree"
+  adopt_worktree "$top"
+}
+
 path_for_slug() {
   local s="$1" p
   while IFS= read -r p; do
@@ -290,14 +390,26 @@ describe() {  # path [base ref] -> "grove/wt1 ~2 ⇡1⇣3"; rows() passes the re
 rows() {
   local p slug session rank label base
   base=$(base_ref "$main_root")
-  while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    slug=$(basename "$p"); session=$(session_for "$slug")
-    IFS='|' read -r rank label <<<"$(status_of "$session")"
-    printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
-      "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
-      "$(describe "$p" "$base")$(upd_note "$session")" "$session" "$p"
-  done < <(grove_worktrees) | sort -t$'\t' -k1,1n | cut -f2-
+  {
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      slug=$(basename "$p"); session=$(session_for "$slug")
+      IFS='|' read -r rank label <<<"$(status_of "$session")"
+      printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
+        "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
+        "$(describe "$p" "$base")$(upd_note "$session")" "$session" "$p"
+    done < <(grove_worktrees)
+    # Rank 5 sinks these below every real row, just above "+ new". The session
+    # field is '-' because nothing of grove's runs in there yet — the same
+    # placeholder new_row uses, which --_kill and the preview both shrug at.
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      slug=$(basename "$p")
+      printf '5\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
+        "$c_bold" "$slug" "$c_rst" "$c_dim" 'unadopted' "$c_rst" \
+        "$(describe "$p" "$base")" '-' "$p"
+    done < <(foreign_worktrees)
+  } | sort -t$'\t' -k1,1n | cut -f2-
 }
 
 # grove's sessions are named grove-<repo>-<slug>, so the name minus the path's
@@ -511,6 +623,10 @@ open_row() {
     attach "$session"; return
   fi
   [ "$in_repo" = 1 ] || die "session is gone: $session"
+  # An unadopted row becomes grove's on the way in, so launch() below sees an
+  # ordinary worktree — right session name, and maybe_sync's grove/* guard now
+  # passes, which is the point of adopting before opening rather than after.
+  if adoptable "$path"; then adopt_worktree "$path"; fi
   launch "$path" "$@"
 }
 
@@ -559,6 +675,7 @@ while [ $# -gt 0 ]; do
     -l|--list)     need_repo; rows | cut -f1 | sed 's/^/  /'; exit 0 ;;
     -s|--sessions) session_rows | cut -f1 | sed 's/^/  /'; exit 0 ;;
     -k|--kill)     need_repo; cmd_kill "${2:-}"; exit 0 ;;
+    adopt)         need_repo; cmd_adopt "${2:-}"; exit 0 ;;
     -n|--new)      need_repo; force_new=1; shift ;;
     -h|--help)     awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$self"; exit 0 ;;
     --)            shift; break ;;
@@ -575,6 +692,8 @@ if [ "$in_repo" = 1 ]; then
     while IFS= read -r p; do
       if [ "$p" = "$here" ]; then launch "$p" "$@"; exit 0; fi
     done < <(grove_worktrees)
+    # Standing in an unadopted one means the same thing as picking its row.
+    if adoptable "$here"; then adopt_worktree "$here"; launch "$here" "$@"; exit 0; fi
   fi
   [ "$force_new" = 1 ] && { launch "$(new_worktree)" "$@"; exit 0; }
 fi

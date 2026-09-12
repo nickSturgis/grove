@@ -20,9 +20,19 @@ optionally `fzf`.
   the old out-of-repo layout. Sessions are `grove-<repo>-<slug>`.
 - The **`grove/<slug>` branch prefix, not the path, is what marks a worktree as
   grove's.** That directory is shared with `claude -w` worktrees (branch
-  `worktree-<name>`), which grove must never list or delete, and the branch test
+  `worktree-<name>`), which grove must never treat as its own, and the branch test
   also keeps finding worktrees left over from the old `$GROVE_ROOT` layout. A
   grove worktree on a detached HEAD drops out of the listing; that's accepted.
+- **Adoption is that rename and nothing else** — `adopt_worktree` moves the branch
+  to `grove/<slug>`, after which the worktree is ordinary and no other code path
+  knows the difference. So it must **rename, never create**: a surviving
+  `worktree-<name>` still holds the commits, and `orphan_count` would report zero
+  and let `-k` delete them unasked. Same reason the slug is forced to the
+  directory basename. `foreign_worktrees` lists candidates as `unadopted` and
+  every picker adopts on open, so the scope is `$wt_base` only — a checkout parked
+  elsewhere in the repo must never be one keystroke from a rename. `grove adopt`
+  takes any path, and resolves it to its worktree **toplevel**: `.` reaches the
+  main checkout, and renaming from there renames main. It did, once.
 - A session pins the claude binary it launched, so it goes stale as Claude Code
   updates under it. `@grove_claude` stamps that binary at launch and `stale`
   compares; an **unstamped** session (started by an older grove) is never stale.
