@@ -36,10 +36,12 @@ grove -l                              # expect ↑2.1.2
 Then force each guard in turn and confirm only the last one restarts — watch
 `argv.log` grow by exactly one `--continue` line:
 
-- `@grove_state working` (and `waiting`, and unset) — marker, no restart
+- `@grove_state working` (and `waiting`) — marker, no restart
 - attached: `tmux new-session -d -s driver "TMUX= tmux attach -t =<session>"`
 - `@grove_claude ''` — a pre-stamp session, never stale
 - `@grove_state idle`, detached — restarts, and `@grove_claude` moves on
+- unset (`set-option -u @grove_state`), detached — restarts too: a session no
+  prompt has ever run in reads as idle
 
 **Run it from inside the worktree**, not the repo root: from the root you get the
 picker, and the restart never runs. And `env -u TMUX`, always — grove attaches

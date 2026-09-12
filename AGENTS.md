@@ -38,8 +38,9 @@ optionally `fzf`.
   compares; an **unstamped** session (started by an older grove) is never stale.
   The restart is a `respawn-pane`, never kill + new-session — the session stays
   up, so it cannot trip the `exit-empty` race below — and it fires only when the
-  cost is provably nil: idle per the `Stop` hook, and nobody attached. Anything
-  else just wears the `↑<version>` marker. See `restartable` for why.
+  cost is provably nil: idle per the `Stop` hook — or never prompted, which the
+  hooks report as no state at all — and nobody attached. Anything else just
+  wears the `↑<version>` marker. See `restartable` for why.
 - Opening a worktree with **no live session** fast-forwards it onto main first:
   `maybe_sync`, called only from `launch`'s new-session branch, and only when the
   worktree is clean (untracked counts) and has no commits main lacks. "Main" is

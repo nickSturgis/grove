@@ -14,9 +14,10 @@
 #
 # A session keeps the claude binary it started with, and Claude Code moves on
 # most days. Stale sessions are marked ↑<version>; opening one restarts it with
-# --continue, as long as it is idle and nobody is attached. A terminal left
-# sitting in a session counts as attached, so a session you keep a window parked
-# in only ever wears the marker — exit it and reopen to pick the new claude up.
+# --continue, as long as it is idle and nobody is attached. A session that has
+# never been prompted counts as idle. A terminal left sitting in a session counts
+# as attached, so a session you keep a window parked in only ever wears the
+# marker — exit it and reopen to pick the new claude up.
 # Sessions started before grove learned to stamp the binary are never marked at
 # all; reopening one once starts stamping it.
 #
@@ -536,13 +537,21 @@ stamp_claude() {  # record which claude this session is now running
 # --- pick up a claude that updated under a running session -------------------
 # Only when the restart provably costs nothing: the Stop hook says the last turn
 # ended, and nobody is attached — so there is no half-typed prompt to throw away,
-# and no in-flight turn to cut off. Working, waiting and unstamped (hooks not
-# installed) sessions keep the binary they have and just wear the ↑ marker. The
-# attached test is also what stops a picker running inside the session from
-# respawning the pane it is standing in.
+# and no in-flight turn to cut off. Working and waiting sessions keep the binary
+# they have and just wear the ↑ marker. The attached test is also what stops a
+# picker running inside the session from respawning the pane it is standing in.
+#
+# No state at all counts as idle. The state is stamped by the hooks, and the
+# first thing any prompt does is stamp `working`, so a session that has never
+# reported one has never been prompted — it is sitting at an empty box with
+# nothing to lose, which is exactly the session worth restarting. (`stale`
+# already requires a grove stamp, so this is never an older grove's session.)
+# It reads `live` rather than `done` in the listing, because grove is inferring
+# the state rather than being told it. The one way this misfires: a project that
+# turns the hooks off, where a real turn can be in flight and look the same.
 restartable() {
   local s=$1
-  alive "$s" && stale "$s" && ! attached "$s" && [ "${S_STATE[$s]:-}" = idle ]
+  alive "$s" && stale "$s" && ! attached "$s" && [ "${S_STATE[$s]:-idle}" = idle ]
 }
 
 has_resume() {
@@ -555,14 +564,23 @@ has_resume() {
 
 # respawn-pane, not kill-session + new-session: the session survives, so this
 # never trips exit-empty's shutdown race, and keeps its name, age and env.
+#
+# --continue picks the conversation back up — except for the never-prompted
+# session, which has none. There, --continue would resume whatever older
+# conversation the *directory* last held, which is not what was on screen: an
+# empty prompt. So it restarts as empty as it was.
 maybe_restart() {
   local session="$1" path="$2"; shift 2
   restartable "$session" || return 0
   [ -n "$path" ] && [ -d "$path" ] || return 0
   local -a args=(${@+"$@"})
-  has_resume ${args[@]+"${args[@]}"} || args=(--continue ${args[@]+"${args[@]}"})
-  printf 'grove: claude %s is out — restarting %s where it left off\n' \
-    "$(claude_version)" "$(basename "$path")" >&2
+  local what='(nothing to resume)'
+  if [ "${S_STATE[$session]:-}" = idle ]; then
+    has_resume ${args[@]+"${args[@]}"} || args=(--continue ${args[@]+"${args[@]}"})
+  fi
+  if has_resume ${args[@]+"${args[@]}"}; then what='where it left off'; fi
+  printf 'grove: claude %s is out — restarting %s %s\n' \
+    "$(claude_version)" "$(basename "$path")" "$what" >&2
   if tmux respawn-pane -k -t "=$session:" -c "$path" \
        "$(claude_cmd ${args[@]+"${args[@]}"})" 2>/dev/null; then
     stamp_claude "$session"
