@@ -95,9 +95,17 @@ here when the next one turns up.
 
 ## Testing
 
-No test suite — grove is verified by hand in scratch repos. The procedure, the
-states you have to force, and the rules for isolating and tearing down the test's
-tmux server are in `docs/testing.md`.
+`tests/run` is the scriptable half — every entrypoint that is argv in, text and
+git state out: rows, adopt, `--_remove`, `-k`, the lock states, the
+fast-forward, `--state`. It builds its own scratch repos and its own tmux
+server, takes seconds, and cleans up after itself. Run it before you touch
+`grove`, and grow it with the code: a new refusal, row marker or entrypoint
+belongs in it. It is the only other executable in the repo; the one-file rule
+above is about `grove`.
+
+What no script can reach — the two pickers, `attach`, the stale-claude restart —
+and the rules for isolating and tearing down the test's tmux server, are in
+`docs/testing.md`.
 
 
 ## Keeping these files navigable
