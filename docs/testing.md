@@ -94,7 +94,25 @@ parked in that directory (`new-session -d -c <path>`) — the session grove itse
 runs in is skipped, or running grove from inside the worktree could never work.
 
 Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
-`printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
+`printf 'y\n' | script -qec 'grove -k wt1' /dev/null`. The `-f` path is the
+opposite case — a dirty worktree plus `grove -k wt1 -f < /dev/null` must still
+succeed, since answering up front is what makes `-k` work with no tty at all.
+
+The lock states `-k` has to tell apart can all be forced with `git worktree
+lock --reason`, no real claude needed:
+
+```bash
+st() { awk '{ sub(/^[0-9]+ \(.*\) /, ""); print $20 }' "/proc/$1/stat"; }
+
+# stale — grove -k clears it and removes, no -f needed
+git worktree lock --reason 'claude session wt1 (pid 999999 start 1)' <path>
+# live — refused, and still refused under -f; the worktree and session survive
+git worktree lock --reason "claude session wt1 (pid $$ start $(st $$))" <path>
+# recycled pid — alive pid, wrong start time: must read as stale
+git worktree lock --reason "claude session wt1 (pid $$ start 1)" <path>
+# no reason at all — unattributable, so it reads as live and is refused
+git worktree lock <path>
+```
 
 Check both picker paths (`GROVE_PICKER=fzf` and `GROVE_PICKER=plain`) — they are
 separate code paths and only one gets exercised on any given machine. Both are now
