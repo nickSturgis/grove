@@ -11,6 +11,7 @@ grove             pick a worktree, or make one if the repo has none
 grove -n          always make a fresh worktree
 grove -l          list this repo's worktrees and their state
 grove -k <slug>   kill the session and remove the worktree
+grove adopt <x>   take over a worktree another tool left behind
 grove --hooks     print the Claude Code hook config for live status
 grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 ```
@@ -22,8 +23,14 @@ Claude Code puts the ones `claude -w` makes — so `/resume` from the main
 checkout finds their sessions under `Ctrl+W`. They're added to
 `.git/info/exclude`, so they never show up in `git status`.
 
-grove only ever lists or removes worktrees on a `grove/<slug>` branch, so
-worktrees you made another way sit in the same directory untouched.
+grove only ever treats a worktree as its own if it is on a `grove/<slug>`
+branch, so the ones `claude -w` makes sit in the same directory untouched — but
+they are listed, as `unadopted`, and opening one adopts it: its branch is
+renamed to `grove/<name>` and from then on it is an ordinary grove worktree.
+`grove adopt <name>` does the rename without opening it. That's a one-way door
+in one respect — Claude Code no longer finds that worktree by name, so its own
+cleanup leaves it to `grove -k` — but it's just a branch rename, and
+`git branch -m` puts it back.
 
 `grove -k` refuses to silently discard work: it warns and shows the commits if
 the branch holds anything not merged anywhere else.

@@ -70,6 +70,29 @@ stays put:
 `grove -s` from a second scratch repo must still show the first repo's marker:
 that is what proves `base_ref` resolves per path.
 
+## Adoption
+
+Make the foreign worktree by hand — `git worktree add -b worktree-<name>
+.claude/worktrees/<name>` is exactly what `claude -w` leaves:
+
+```bash
+grove -l                      # expect: <name>  unadopted  worktree-<name>
+grove adopt <name>            # then free / grove/<name>
+```
+
+The refusals are the part worth forcing, because one of them renamed `main`
+during development. `grove adopt` must reject `.`, `.claude`, `$wt_base`, a path
+in another repo, a detached-HEAD worktree, and a name whose `grove/<slug>` branch
+already exists — **check `git branch --list` is untouched after each.** A path
+*inside* a worktree adopts that worktree, and re-adopting is a silent no-op.
+
+Opening adopts too, from the picker and from a bare `grove` run inside the
+worktree. Both go through `adopt_worktree`, so what those add is the launch after
+it: expect the rename line, then a fast-forward if the tree is clean and behind,
+then a `grove-<repo>-<name>` session. The busy guard needs a *second* tmux session
+parked in that directory (`new-session -d -c <path>`) — the session grove itself
+runs in is skipped, or running grove from inside the worktree could never work.
+
 Prompts read from `/dev/tty`, so testing the confirm paths needs a pty:
 `printf 'y\n' | script -qec 'grove -k wt1' /dev/null`.
 
