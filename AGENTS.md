@@ -37,7 +37,12 @@ optionally `fzf`.
   `base_ref` resolves it per path, because sessions-tab rows span repos. Listings
   mark the gap as `⇡own⇣behind`; double arrows, because `↑` is the claude marker.
 - Never destroy work without confirming: `-k` checks both uncommitted files and
-  commits reachable from no other ref.
+  commits reachable from no other ref. `-f` answers that prompt up front (the
+  warning still prints), and is the only way to use `-k` without a tty. It does
+  **not** override a **live** Claude Code worktree lock — that names a process
+  editing those files right now, and `-f` typed for the common **stale** lock is
+  not consent to corrupt it. A stale one clears with no flag at all: see
+  `lock_reason`/`lock_live`.
 - All human output goes to **stderr**; stdout is reserved for machine-readable
   rows (`grove --_rows`, consumed by the fzf reload binding).
 - Rows are tab-delimited `display\tsession\tpath\ttab`. `display` must not contain tabs,

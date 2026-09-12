@@ -7,6 +7,7 @@
 #   grove -l          list this repo's worktrees and their state
 #   grove -s          list every live grove session, in any repo
 #   grove -k <slug>   kill the session and remove the worktree
+#   grove -k <s> -f   …and skip the are-you-sure when it still holds work
 #   grove --hooks     print the Claude Code hook config for live status
 #   grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 #
@@ -23,6 +24,11 @@
 # only when it is clean and has no commits of its own, so nothing can be lost.
 # Listings mark how far each worktree sits from main: ⇡ its own commits, ⇣ the
 # ones main has moved on by. A clean worktree wearing only ⇣ catches up on open.
+#
+# A worktree Claude Code has entered carries a git lock naming the session
+# holding it. -k clears one whose process is gone, and refuses one still
+# running rather than pulling the files out from under it — unlock that by
+# hand if the process is unrelated.
 #
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
@@ -517,6 +523,42 @@ open_row() {
 # commits that exist only on this branch: --branches globs are relative to
 # refs/heads, and plain --all would count the worktree's own HEAD, so neither
 # "refs/heads/grove/$slug" nor "--all" works here.
+# Claude Code locks a worktree it has entered, with a reason naming the process
+# holding it: "claude session wt1 (pid 171468 start 167555845)". It unlocks on
+# exit, so a lock outliving its process is litter, not work — and the start
+# time is what tells a recycled pid from the original. grove never locks.
+# git prints a bare "locked" when no reason was given; that reads as live, the
+# safe direction, since we cannot tell whose it is.
+lock_reason() {  # path -> the lock reason, '' when unlocked
+  git -C "$main_root" worktree list --porcelain 2>/dev/null | awk -v p="$1" '
+    /^worktree /        { w = (substr($0, 10) == p); next }
+    w && /^locked /     { print substr($0, 8); exit }
+    w && $0 == "locked" { print "(no reason)"; exit }
+    w && $0 == ""       { exit }'
+}
+
+# /proc/<pid>/stat field 2 is (comm) and may itself hold spaces and ')', so the
+# greedy sub strips through the last ') ' — field 20 of what is left is the
+# overall field 22, starttime. kill -0 says EPERM for another user's process,
+# which would read as dead, hence the /proc fallback; no /proc at all (non-Linux)
+# degrades to "alive", which refuses rather than destroys.
+lock_live() {  # reason -> 0 when the process that took it is still running
+  local r="$1" pid start cur
+  case "$r" in
+    'claude session '*'(pid '*|'claude agent '*'(pid '*) ;;
+    *) return 0 ;;
+  esac
+  pid=${r##*'(pid '}; pid=${pid%%[!0-9]*}
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || [ -e "/proc/$pid" ] || return 1
+  case "$r" in *' start '*)
+    start=${r##*' start '}; start=${start%)}
+    cur=$(awk '{ sub(/^[0-9]+ \(.*\) /, ""); print $20 }' "/proc/$pid/stat" 2>/dev/null) || cur=''
+    [ -z "$cur" ] || [ "$start" = "$cur" ] || return 1 ;;
+  esac
+  return 0
+}
+
 orphan_count() {
   local slug="$1"
   git -C "$main_root" show-ref --verify --quiet "refs/heads/grove/$slug" || { printf 0; return; }
@@ -525,11 +567,28 @@ orphan_count() {
 }
 
 cmd_kill() {
-  local slug="${1:-}" path session dirty orphans risk="" ans
-  [ -n "$slug" ] || die "usage: grove -k <slug>"
+  local slug="" force=0 path session dirty orphans risk="" lock ans
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -*)         die "usage: grove -k <slug> [-f]" ;;
+      *)          [ -z "$slug" ] || die "usage: grove -k <slug> [-f]"
+                  slug="$1"; shift ;;
+    esac
+  done
+  [ -n "$slug" ] || die "usage: grove -k <slug> [-f]"
   case "$slug" in */*|''|.|..) die "invalid slug: $slug" ;; esac
   path=$(path_for_slug "$slug"); session=$(session_for "$slug")
   [ -n "$path" ] || die "no such worktree: $slug"
+
+  # Before the prompt, so grove never asks a question it means to reject, and
+  # before the session kill below, so a refusal leaves nothing half-done.
+  lock=$(lock_reason "$path")
+  if [ -n "$lock" ] && lock_live "$lock"; then
+    die "$slug is locked by a running process — $lock
+      it is still working in that directory; close it, or if the process is
+      unrelated: git -C $main_root worktree unlock $path"
+  fi
 
   dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
   orphans=$(orphan_count "$slug")
@@ -543,11 +602,17 @@ cmd_kill() {
     [ "$orphans" -gt 0 ] && git -C "$main_root" --no-pager log --oneline -5 \
       "grove/$slug" --not --exclude="grove/$slug" --branches --tags --remotes \
       | sed 's/^/      /' >&2
-    printf 'grove: delete it anyway? [y/N] ' >&2
-    read -r ans </dev/tty || die "aborted"
-    case "$ans" in y|Y) ;; *) exit 1 ;; esac
+    if [ "$force" = 1 ]; then
+      printf 'grove: -f given — deleting anyway\n' >&2
+    else
+      printf 'grove: delete it anyway? [y/N] ' >&2
+      read -r ans </dev/tty || die "aborted"
+      case "$ans" in y|Y) ;; *) exit 1 ;; esac
+    fi
   fi
   alive "$session" && tmux kill-session -t "=$session"
+  [ -n "$lock" ] && { git -C "$main_root" worktree unlock "$path" 2>/dev/null \
+    || die "couldn't unlock $slug — try: git -C $main_root worktree unlock $path"; }
   git -C "$main_root" worktree remove --force "$path"
   git -C "$main_root" branch -D "grove/$slug" 2>/dev/null || true
   printf 'grove: removed %s\n' "$slug" >&2
@@ -558,7 +623,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -l|--list)     need_repo; rows | cut -f1 | sed 's/^/  /'; exit 0 ;;
     -s|--sessions) session_rows | cut -f1 | sed 's/^/  /'; exit 0 ;;
-    -k|--kill)     need_repo; cmd_kill "${2:-}"; exit 0 ;;
+    -k|--kill)     need_repo; shift; cmd_kill "$@"; exit 0 ;;
     -n|--new)      need_repo; force_new=1; shift ;;
     -h|--help)     awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$self"; exit 0 ;;
     --)            shift; break ;;

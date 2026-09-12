@@ -11,6 +11,7 @@ grove             pick a worktree, or make one if the repo has none
 grove -n          always make a fresh worktree
 grove -l          list this repo's worktrees and their state
 grove -k <slug>   kill the session and remove the worktree
+grove -k <s> -f   …and skip the are-you-sure when it still holds work
 grove --hooks     print the Claude Code hook config for live status
 grove -- <args>   pass args through to claude (e.g. grove -- --continue)
 ```
@@ -26,7 +27,15 @@ grove only ever lists or removes worktrees on a `grove/<slug>` branch, so
 worktrees you made another way sit in the same directory untouched.
 
 `grove -k` refuses to silently discard work: it warns and shows the commits if
-the branch holds anything not merged anywhere else.
+the branch holds anything not merged anywhere else, then asks. `-f` answers that
+question up front — the warning still prints — which is also what makes `-k`
+usable with no terminal to prompt at.
+
+A worktree Claude Code has entered carries a git lock naming the session holding
+it, and a session that dies without releasing it leaves that lock behind. `-k`
+clears one whose process is gone, and refuses one still running — even under
+`-f`, since another agent is working in those files. Unlock that one by hand
+(`git worktree unlock <path>`) if you know the process is unrelated.
 
 ## Install
 
