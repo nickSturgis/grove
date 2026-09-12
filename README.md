@@ -1,7 +1,9 @@
 # grove
 
 Launch Claude Code in an isolated git worktree, inside a tmux session that
-outlives your terminal. One bash file.
+outlives your terminal.
+
+One bash file — no build step, no runtime, nothing to install but a symlink.
 
 A grove is a stand of trees — here, the set of worktrees you have Claude
 working in. Plant one per task, survey them, cut them down when merged.
@@ -83,3 +85,7 @@ predating this gets neither.
 
 Started as our own worktree-per-task tmux launcher; the session-state and
 picker ideas were sharpened by [craftzdog/tmux-claude-session-manager](https://github.com/craftzdog/tmux-claude-session-manager).
+
+Unrelated to [ZiiMs/Grove](https://github.com/ZiiMs/Grove), a Rust TUI for
+running several agent CLIs at once, which had the name first — we arrived at it
+separately, from the trees.
