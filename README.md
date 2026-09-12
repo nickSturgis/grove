@@ -35,6 +35,12 @@ in one respect — Claude Code no longer finds that worktree by name, so its own
 cleanup leaves it to `grove -k` — but it's just a branch rename, and
 `git branch -m` puts it back.
 
+The picker has a key for both halves of that. `ctrl-x` (`x` without fzf) kills a
+session and leaves its worktree standing. `ctrl-d` (`d`) takes the worktree away
+as well — but only one of grove's own that is clean and whose commits have all
+landed somewhere else. With nothing to lose it never asks; anything else it
+refuses and says why, and `grove -k` is the way through, with its prompt.
+
 `grove -k` refuses to silently discard work: it warns and shows the commits if
 the branch holds anything not merged anywhere else, then asks. `-f` answers that
 question up front — the warning still prints — which is also what makes `-k`

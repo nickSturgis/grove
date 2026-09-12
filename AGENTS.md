@@ -77,36 +77,21 @@ optionally `fzf`.
 - Killing a session is not destroying work — the worktree stays — so the kill
   key needs no confirmation. It routes through `grove --_kill`, which refuses
   any name that isn't `grove-*` and refuses the session it is running in.
+- The **remove** key (`safe_remove`) needs none for the opposite reason: it acts
+  only where there is provably nothing to lose — `grove/*` branch, clean tree,
+  no commits of its own, no live lock — and refuses everything else by name,
+  pointing at `-k`, the one that prompts. So it must never grow a force flag or
+  a prompt of its own, and never read `$main_root`: rows span repos, so `$root`
+  comes from the row's path (hence `lock_reason` is `-C` that path too).
+  fzf never sees its stderr; the outcome rides `$GROVE_NOTE` onto the header
+  line, so **every** reload binding must pass that variable, not just this key's.
 
 ## Gotchas found the hard way
 
-- fzf substitutes `{2}` as a *shell-quoted* string, so it must never sit inside
-  quotes: `-t ={2}:` works, `-t "={2}:"` passes literal quote characters.
-- `git rev-list --exclude=<glob>` globs are relative to the ref-listing option
-  that follows, so it's `--exclude=grove/wt1 --branches`, not
-  `--exclude=refs/heads/grove/wt1`. And `--all` silently includes every
-  worktree's HEAD, which would always protect the branch you're testing.
-- `a | b || c` binds `||` to `b`. Wrap the fallback: `{ a || c; } | b`.
-- `printf '%-10s'` counts ANSI escape bytes as width, so pad the plain string and
-  wrap the padded result in colour — never colour first.
-- tmux `send-keys`/`capture-pane`/`respawn-pane`/`set-option` take a *pane* target,
-  so `-t =<session>` fails with "can't find pane" where `kill-session` accepts it.
-  The trailing colon is required — and on `set-option -q` the failure is silent,
-  so the option simply never gets set.
-- The plain picker marks the current row with a pointer, not reverse video: each row
-  carries its own colour resets, which would cancel a reverse attribute mid-line.
-- `exit-empty` (on by default) stops the tmux **server** the moment its last
-  session dies, and a server mid-shutdown still accepts `new-session` before
-  taking that session down with it. `launch` therefore `has-session`-checks
-  before attaching: without it the client prints a bare `[exited]`, which reads
-  like grove crashed when nothing of grove's went wrong.
-- fzf `change-header` needs 0.42; Debian still ships **0.38**, which dies with
-  "unknown action" on an unknown binding — taking the whole picker with it. That
-  is why the tab bar rides in on `--header-lines`. Check any new binding against
-  0.38 before using it.
-- The plain picker's frame changes height when you switch tabs, so it rewinds by
-  the count it actually drew (`FRAME`) and blanks the surplus lines — rewinding
-  by row count alone leaves the old tab's rows stranded below.
+Ten of them, in `docs/gotchas.md` — fzf's quoting and version floor, tmux
+target forms, `rev-list --exclude` scope, ANSI-vs-`printf` width, the
+`exit-empty` race. **Read it before editing `grove`**, and add to it rather than
+here when the next one turns up.
 
 ## Testing
 

@@ -35,6 +35,11 @@
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
 #
+# Its kill key (ctrl-x, or x without fzf) ends a session and leaves the worktree.
+# Its remove key (ctrl-d, or d) takes the whole worktree away, but only one that
+# is clean and holds no commits of its own — nothing to lose, so it never asks.
+# Anything it refuses, it says why; -k is the way through, with its prompt.
+#
 # Worktrees live at <repo>/.claude/worktrees/<slug>, where Claude Code puts its
 # own, so /resume finds their sessions. $GROVE_ROOT restores the old location.
 #
@@ -479,7 +484,16 @@ new_row() {
 # so the tab indicator has to ride in on the row stream.
 if [ "${1:-}" = "--_rows" ]; then
   t="${2:-worktrees}"; [ "$in_repo" = 1 ] || t=sessions
-  tabbar "$t"; printf '\n'
+  # The remove key's outcome, left by a --_remove that ran a moment ago. Every
+  # reload binding passes $GROVE_NOTE, so whichever one comes next shows the
+  # note and empties the file — one action, one line, gone by the following key.
+  note=''
+  if [ -n "${GROVE_NOTE:-}" ] && [ -s "$GROVE_NOTE" ]; then
+    note=$(cat "$GROVE_NOTE"); : > "$GROVE_NOTE"
+  fi
+  tabbar "$t"
+  if [ -n "$note" ]; then printf '   %s' "$note"; fi
+  printf '\n'
   if [ "$t" = sessions ]; then session_rows
   else rows; new_row
   fi
@@ -682,8 +696,10 @@ open_row() {
 # time is what tells a recycled pid from the original. grove never locks.
 # git prints a bare "locked" when no reason was given; that reads as live, the
 # safe direction, since we cannot tell whose it is.
+# -C the path, not $main_root: the same listing either way, and safe_remove
+# asks about worktrees of repos $main_root knows nothing about.
 lock_reason() {  # path -> the lock reason, '' when unlocked
-  git -C "$main_root" worktree list --porcelain 2>/dev/null | awk -v p="$1" '
+  git -C "$1" worktree list --porcelain 2>/dev/null | awk -v p="$1" '
     /^worktree /        { w = (substr($0, 10) == p); next }
     w && /^locked /     { print substr($0, 8); exit }
     w && $0 == "locked" { print "(no reason)"; exit }
@@ -712,12 +728,74 @@ lock_live() {  # reason -> 0 when the process that took it is still running
   return 0
 }
 
-orphan_count() {
-  local slug="$1"
-  git -C "$main_root" show-ref --verify --quiet "refs/heads/grove/$slug" || { printf 0; return; }
-  git -C "$main_root" rev-list --count "grove/$slug" \
-    --not --exclude="grove/$slug" --branches --tags --remotes 2>/dev/null || printf 0
+# Takes the root as well as the branch, because safe_remove asks it about repos
+# $main_root has never heard of.
+orphan_count() {  # root, branch -> commits on it that no other ref holds
+  git -C "$1" show-ref --verify --quiet "refs/heads/$2" || { printf 0; return; }
+  git -C "$1" rev-list --count "$2" \
+    --not --exclude="$2" --branches --tags --remotes 2>/dev/null || printf 0
 }
+
+# --- the pickers' remove key -------------------------------------------------
+# -k asks before destroying work; this never asks, because it only ever acts
+# where there is nothing to ask about — a grove worktree that is clean and
+# whose commits all live somewhere else. Every other case it refuses and names
+# -k, which can explain and prompt. Nothing here reads $main_root: a
+# sessions-tab row can belong to another repo, so the worktree's own path is
+# the only repo handle there is, and $root comes back from it.
+safe_remove() {  # path, session -> 0 removed, 1 refused; the reason on stdout
+  local p="$1" s="${2:--}" root br slug dirty orphans lock out
+  [ -n "$p" ] && [ "$p" != "$NEW_SENTINEL" ] || { printf 'nothing to remove'; return 1; }
+  [ -d "$p" ] || { printf 'its directory is already gone — x kills the session'; return 1; }
+  slug=$(basename "$p")
+  root=$(git -C "$p" rev-parse --git-common-dir 2>/dev/null) \
+    && root=$(cd "$p" && cd "$root" && pwd -P) \
+    || { printf '%s is not a git worktree' "$slug"; return 1; }
+  root=$(dirname "$root")
+  [ "$p" != "$root" ] || { printf '%s is the main checkout' "$slug"; return 1; }
+  # Standing in it, or under it: removing it would drop the shell into a hole.
+  case "$(pwd -P)/" in "$p"/*) printf '%s is where you are standing' "$slug"; return 1 ;; esac
+  # The branch is the ownership test everywhere else in grove, and it is what
+  # keeps one keystroke away from a `claude -w` worktree or a detached HEAD.
+  br=$(git -C "$p" symbolic-ref --short -q HEAD) || br=''
+  case "$br" in
+    grove/*) ;;
+    '')      printf '%s is on a detached HEAD — grove -k %s' "$slug" "$slug"; return 1 ;;
+    *)       printf '%s is not grove'\''s yet (%s) — open it once to adopt it' "$slug" "$br"
+             return 1 ;;
+  esac
+  dirty=$(git -C "$p" status --porcelain 2>/dev/null | wc -l)
+  [ "$dirty" -eq 0 ] \
+    || { printf '%s has %d uncommitted file(s) — grove -k %s' "$slug" "$dirty" "$slug"; return 1; }
+  orphans=$(orphan_count "$root" "$br")
+  [ "$orphans" -eq 0 ] \
+    || { printf '%s has %d commit(s) of its own — grove -k %s' "$slug" "$orphans" "$slug"; return 1; }
+  lock=$(lock_reason "$p")
+  if [ -n "$lock" ] && lock_live "$lock"; then
+    printf '%s is locked by a running process — %s' "$slug" "$lock"; return 1
+  fi
+  if alive "$s"; then tmux kill-session -t "=$s" 2>/dev/null || true; fi
+  if [ -n "$lock" ]; then git -C "$root" worktree unlock "$p" 2>/dev/null || true; fi
+  # No --force: git refusing here is a second opinion on everything above, and
+  # its own first line says more than any guess this could make.
+  out=$(git -C "$root" worktree remove "$p" 2>&1) \
+    || { printf '%s: %s' "$slug" "$(printf '%s' "$out" | head -1)"; return 1; }
+  git -C "$root" branch -D "$br" >/dev/null 2>&1 || true
+  printf 'removed %s' "$slug"
+}
+
+# fzf runs the remove key in a subprocess, so the outcome comes back through the
+# file named by $GROVE_NOTE: the next --_rows prints it on the header line and
+# empties it. The plain picker is the same process and calls safe_remove itself.
+if [ "${1:-}" = "--_remove" ]; then
+  if msg=$(safe_remove "${2:-}" "${3:--}"); then msg="$c_grn$msg$c_rst"
+  else                                          msg="$c_red$msg$c_rst"
+  fi
+  if [ -n "${GROVE_NOTE:-}" ]; then printf '%s' "$msg" > "$GROVE_NOTE"
+  else                              printf 'grove: %s\n' "$msg" >&2
+  fi
+  exit 0
+fi
 
 cmd_kill() {
   local slug="" force=0 path session dirty orphans risk="" lock ans
@@ -744,7 +822,7 @@ cmd_kill() {
   fi
 
   dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l)
-  orphans=$(orphan_count "$slug")
+  orphans=$(orphan_count "$main_root" "grove/$slug")
   [ "$dirty" -gt 0 ]   && risk="$dirty uncommitted file(s)"
   if [ "$orphans" -gt 0 ]; then
     [ -n "$risk" ] && risk="$risk and "
@@ -836,10 +914,21 @@ esac
 
 if [ "$use_fzf" = 1 ]; then
   qself=$(printf '%q' "$self")
+  # Where a --_remove subprocess leaves its outcome for the reload that follows
+  # it. mktemp rather than a name built from $$, which any other process could
+  # have planted first; losing it just costs the note, so failure is not fatal.
+  note=$(mktemp "${TMPDIR:-/tmp}/grove-note.XXXXXX" 2>/dev/null) || note=''
+  if [ -n "$note" ]; then trap 'rm -f "$note"' EXIT; fi
+  # Rides on every reload, not just the remove key's: whichever reload comes
+  # next is the one that has to clear the note the last remove left behind.
+  env_pfx="GROVE_ANSI=1 GROVE_NOTE=$(printf '%q' "$note")"
+  # ctrl-d, not d: a bare letter belongs to the query line. It rebinds fzf's
+  # half-page-down, which a 70%-height picker of one row per worktree has no
+  # use for.
   if [ "$in_repo" = 1 ]; then
-    hint='enter open · ctrl-x kill session · ctrl-n new worktree · ←→ tabs · esc quit'
+    hint='enter open · ctrl-x kill session · ctrl-d remove worktree · ctrl-n new · ←→ tabs · esc quit'
   else
-    hint='enter attach · ctrl-x kill session · esc quit'
+    hint='enter attach · ctrl-x kill session · ctrl-d remove worktree · esc quit'
   fi
   fzf_args=(
     --ansi --delimiter='\t' --with-nth=1 --height=70% --reverse --no-multi
@@ -847,15 +936,16 @@ if [ "$use_fzf" = 1 ]; then
     --preview='if [ {3} = %new% ]; then echo "make a fresh worktree and open it"; else
                  { tmux capture-pane -pe -t ={2}: 2>/dev/null || echo "(not running)"; } | tail -40; fi'
     --preview-window='right,58%,border-left'
-    --bind="ctrl-x:execute-silent($qself --_kill {2})+reload(GROVE_ANSI=1 $qself --_rows {4})"
+    --bind="ctrl-x:execute-silent($qself --_kill {2})+reload($env_pfx $qself --_rows {4})"
+    --bind="ctrl-d:execute-silent($env_pfx $qself --_remove {3} {2})+reload($env_pfx $qself --_rows {4})"
     --expect=ctrl-n
   )
   # Two tabs, so the arrows are absolute rather than a toggle, and fzf needs no
   # state of its own: ← is always worktrees, → always sessions.
   if [ "$in_repo" = 1 ]; then
     fzf_args+=(
-      --bind="left:reload(GROVE_ANSI=1 $qself --_rows worktrees)+first"
-      --bind="right:reload(GROVE_ANSI=1 $qself --_rows sessions)+first"
+      --bind="left:reload($env_pfx $qself --_rows worktrees)+first"
+      --bind="right:reload($env_pfx $qself --_rows sessions)+first"
     )
   fi
   out=$({ tabbar "$TAB"; printf '\n'; printf '%s\n' "${ROWS[@]}"; } | fzf "${fzf_args[@]}") || true
@@ -874,6 +964,7 @@ fi
 # a pointer rather than reverse video: each row already carries its own colour
 # resets, which would cancel a reverse attribute part-way along the line.
 DISP=()
+NOTE=''
 rebuild() {
   local r
   DISP=()
@@ -902,10 +993,10 @@ plain_pick() {
 
     if [ "$TAB" = sessions ]; then
       title='grove sessions'
-      hint='↑↓/jk move   enter attach   x kill session   q quit'
+      hint='↑↓/jk move   enter attach   x kill session   d remove worktree   q quit'
     else
       title="$repo"
-      hint='↑↓/jk move   enter open   x kill session   n new   q quit'
+      hint='↑↓/jk move   enter open   x kill   d remove worktree   n new   q quit'
     fi
     [ "$in_repo" = 1 ] && hint="$hint   ←→ tabs"
 
@@ -913,6 +1004,7 @@ plain_pick() {
     fline "  $c_bold$title$c_rst"
     fline "  $(tabbar "$TAB")"
     fline "  $c_dim$hint$c_rst"
+    if [ -n "$NOTE" ]; then fline "  $NOTE"; fi
     fline ''
     if [ "$n" -eq 0 ]; then
       fline "    ${c_dim}(nothing here)$c_rst"
@@ -958,6 +1050,7 @@ plain_pick() {
       G)           cur=$(( n - 1 )) ;;
       [1-9])       [ "$k" -le "$n" ] && cur=$(( k - 1 )) ;;
       x|$'\030')   [ "$n" -gt 0 ] && kill_row "$cur" ;;
+      d|$'\004')   [ "$n" -gt 0 ] && remove_row "$cur" ;;
       n|N)         [ "$TAB" = worktrees ] && { PICKED=new; return 0; } ;;
       q|Q|$'\003') return 0 ;;
     esac
@@ -968,6 +1061,7 @@ switch_tab() {  # true only when the tab actually changed, so the caller resets
   [ "$in_repo" = 1 ] || return 1
   [ "$TAB" = "$1" ] && return 1
   TAB=$1
+  NOTE=''
   load_rows; rebuild
   return 0
 }
@@ -975,7 +1069,20 @@ switch_tab() {  # true only when the tab actually changed, so the caller resets
 kill_row() {
   local s
   s=$(printf '%s' "${ROWS[$1]}" | cut -f2)
+  NOTE=''
   "$self" --_kill "$s" || true
+  refresh_sessions; load_rows; rebuild
+}
+
+# The same key as fzf's ctrl-d, and the same rules — but in-process, so the
+# outcome goes straight into the frame instead of through $GROVE_NOTE.
+remove_row() {
+  local s p
+  s=$(printf '%s' "${ROWS[$1]}" | cut -f2)
+  p=$(printf '%s' "${ROWS[$1]}" | cut -f3)
+  if NOTE=$(safe_remove "$p" "$s"); then NOTE="$c_grn$NOTE$c_rst"
+  else                                   NOTE="$c_red$NOTE$c_rst"
+  fi
   refresh_sessions; load_rows; rebuild
 }
 
