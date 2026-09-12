@@ -618,15 +618,34 @@ launch() {
 open_row() {
   local session="$1" path="$2"; shift 2
   if [ "$path" = "$NEW_SENTINEL" ]; then launch "$(new_worktree)" "$@"; return; fi
+  # alive() reads a snapshot taken before the picker drew, so a row can die
+  # while you sit on it. Ask tmux again before attaching: otherwise the client
+  # prints a bare [exited] and it reads like grove crashed — the same thing
+  # exit-empty produces, arrived at from the other side.
   if alive "$session"; then
-    maybe_restart "$session" "$path" "$@"
-    attach "$session"; return
+    if tmux has-session -t "=$session" 2>/dev/null; then
+      maybe_restart "$session" "$path" "$@"
+      attach "$session"; return
+    fi
+    # Caught the snapshot in a lie, so reload it: launch() asks alive() too,
+    # and would attach to the same corpse instead of starting a session.
+    refresh_sessions
   fi
-  [ "$in_repo" = 1 ] || die "session is gone: $session"
+  # Falling through means relaunching, and launch() names the session after
+  # *this* repo — so a sessions-tab row from another repo, whose session died
+  # under the picker, would come back under a name that belongs to neither.
+  # Only relaunch a row this repo can name, and only into a directory that is
+  # still there: a "gone" row has nothing to open.
+  [ "$in_repo" = 1 ] && [ -n "$path" ] && [ -d "$path" ] \
+    || die "session is gone: $session"
   # An unadopted row becomes grove's on the way in, so launch() below sees an
   # ordinary worktree — right session name, and maybe_sync's grove/* guard now
   # passes, which is the point of adopting before opening rather than after.
-  if adoptable "$path"; then adopt_worktree "$path"; fi
+  if adoptable "$path"; then
+    adopt_worktree "$path"
+  elif [ "$session" != "$(session_for "$(basename "$path")")" ]; then
+    die "session is gone: $session"
+  fi
   launch "$path" "$@"
 }
 
