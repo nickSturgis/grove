@@ -111,7 +111,8 @@ optionally `fzf`.
 ## Testing
 
 No test suite — grove is verified by hand in scratch repos. The procedure, the
-states you have to force, and the tear-down rule are in `docs/testing.md`.
+states you have to force, and the rules for isolating and tearing down the test's
+tmux server are in `docs/testing.md`.
 
 
 ## Keeping these files navigable
