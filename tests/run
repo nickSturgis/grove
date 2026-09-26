@@ -214,6 +214,13 @@ t_rows() {
   eq 'every row is 4 tab-delimited fields' "$bad_fields" ''
   eq 'last row is %new%'      "$(printf '%s\n' "$OUT" | tail -1 | cut -f3)" '%new%'
   eq "%new%'s session is '-'" "$(printf '%s\n' "$OUT" | tail -1 | cut -f2)" '-'
+  # The main checkout sits below every worktree, unadopted ones included, and
+  # above + new. It is a real row, not a synthetic one: its own path and a
+  # session name grove can launch into.
+  eq 'the main checkout is the row before + new' \
+     "$(printf '%s\n' "$OUT" | tail -2 | head -1 | cut -f3)" "$R1"
+  eq 'and carries a session name of its own' \
+     "$(printf '%s\n' "$OUT" | tail -2 | head -1 | cut -f2)" 'grove-r1-r1'
   eq 'rows carry their tab name' \
      "$(printf '%s\n' "$OUT" | tail -n +2 | cut -f4 | sort -u | tr '\n' ' ')" 'worktrees '
 
@@ -226,6 +233,7 @@ t_rows() {
   hasnt '-l: never shows %new%'   "$OUT" '%new%'
   hasnt '-l: display field only'  "$OUT" "$(printf '\t')"
   has   '-l: lists the worktree'  "$OUT" 'wt1'
+  has   '-l: lists the main checkout too' "$(row r1)" 'main'
 
   f=$SB/note
   printf 'removed wt7' > "$f"
@@ -256,23 +264,42 @@ t_markers() {
   group 'what a row says: branch, dirt, drift, status, staleness'
   local v
   reset_repo "$R1" "$BASE1"; wipe_sessions
+  # Every real grove repo has this: new_worktree's ensure_ignored writes it
+  # before the first worktree exists. wt() below is plain git, which does not —
+  # and the main checkout now has a row, which would otherwise count
+  # .claude/worktrees as its own dirt and make every ~ assertion here ambiguous.
+  printf '**/.claude/worktrees/\n' >> "$R1/.git/info/exclude"
   wt "$R1" wt1
   CWD=$R1
 
+  # Scoped to the worktree's own row: the main checkout's row is in this
+  # listing too, so a bare $OUT match no longer says which row it found.
   g -l
-  has   'clean worktree names its branch' "$OUT" 'grove/wt1'
-  has   'no session reads free'           "$OUT" 'free'
-  hasnt 'clean: no dirt marker'           "$OUT" '~'
-  hasnt 'clean: no drift marker'          "$OUT" '⇣'
+  has   'clean worktree names its branch' "$(row wt1)" 'grove/wt1'
+  has   'no session reads free'           "$(row wt1)" 'free'
+  hasnt 'clean: no dirt marker'           "$(row wt1)" '~'
+  hasnt 'clean: no drift marker'          "$(row wt1)" '⇣'
 
   : > "$W1/wt1/scratch"
-  g -l; has 'an untracked file counts as dirty' "$OUT" '~1'
+  g -l; has 'an untracked file counts as dirty' "$(row wt1)" '~1'
   rm "$W1/wt1/scratch"
 
+  # The main checkout's row: its branch and its dirt are real, its drift never
+  # is — base_ref resolves to the branch it has checked out, so it cannot be
+  # ahead of or behind itself.
+  g -l
+  has   'the main checkout gets a row'      "$(row r1)" 'main'
+  hasnt 'clean main: no dirt marker'        "$(row r1)" '~'
+  hasnt 'and it never drifts from itself'   "$(row r1)" '⇡'
+  : > "$R1/scratch"
+  g -l; has 'a dirty main checkout says so' "$(row r1)" '~1'
+  rm "$R1/scratch"
+
   git -C "$R1" commit -q --allow-empty -m on-main
-  g -l; has 'main moved on: ⇣' "$OUT" '⇣1'
+  g -l; has 'main moved on: ⇣' "$(row wt1)" '⇣1'
+  hasnt 'but main itself is never behind' "$(row r1)" '⇣'
   git -C "$W1/wt1" commit -q --allow-empty -m mine
-  g -l; has 'both moved: ⇡⇣'   "$OUT" '⇡1⇣1'
+  g -l; has 'both moved: ⇡⇣'   "$(row wt1)" '⇡1⇣1'
 
   git -C "$R1" checkout -q --detach
   g -l; hasnt 'detached main checkout: no drift marker at all' "$OUT" '⇣'
@@ -297,9 +324,9 @@ t_markers() {
   wt "$R1" wt2
   tmux set-option -t '=grove-r1-wt1:' -q @grove_state waiting
   g --_rows worktrees
-  eq 'needs-you first, unadopted second-last, + new last' \
+  eq 'needs-you first, unadopted then main, + new last' \
      "$(printf '%s\n' "$OUT" | tail -n +2 | awk -F'\t' '{ print $1 }' | awk '{ printf "%s ", $1 }')" \
-     'wt1 wt2 wt9 + '
+     'wt1 wt2 wt9 r1 + '
   tmux set-option -t '=grove-r1-wt1:' -u @grove_state
 
   tmux new-session -d -s driver -c "$HOME" 'TMUX= tmux attach -t =grove-r1-wt1'
@@ -321,10 +348,16 @@ t_markers() {
   # sessions tab
   wt "$R2" wt1
   mksess grove-r2-wt1 "$R2/.claude/worktrees/wt1" idle
+  mksess grove-r1-r1 "$R1" idle
   git -C "$R2" commit -q --allow-empty -m on-main-2
   g -s
   has 'sessions tab names repo/slug'  "$OUT" 'r1/wt1'
   has 'sessions tab spans repos'      "$OUT" 'r2/wt1'
+  # A main checkout's directory is named after its repo, so the honest
+  # reconstruction reads "r1/r1". main_root_of resolves it from the row's own
+  # path — the only handle a sessions-tab row from another repo gives.
+  has   'a session in the main checkout reads repo/main' "$OUT" 'r1/main'
+  hasnt 'and never repo/repo'                            "$OUT" 'r1/r1'
   has "another repo's drift is read from that path, not \$main_root" "$OUT" '⇣1'
   case $(printf '%s\n' "$OUT" | grep r1/wt1) in
     *[0-9]s*|*[0-9]m*) ok 'sessions tab shows an age' ;;
@@ -558,6 +591,14 @@ t_kill() {
   done
   g -k nothing-here
   has '-k on an unknown slug' "$ERR" 'no such worktree'
+
+  # The main checkout has a row and a session now, so its slug is a name someone
+  # can type here. path_for_slug would miss it and call it missing; the refusal
+  # is explicit so it reads as a rule rather than a lookup failure.
+  g -k r1
+  rcis  '-k on the main checkout: exit 1' 1
+  has   '-k refuses it by name'      "$ERR" 'main checkout'
+  hasnt 'and never reads as lost'    "$ERR" 'no such worktree'
   g -k wt1 -k wt2
   has '-k takes one slug' "$ERR" 'usage:'
 
@@ -634,6 +675,17 @@ t_launch() {
   reset_repo "$R1" "$BASE1"; wipe_sessions
   CWD=$R1
   if [ "$HAVE_E" = 0 ]; then skip 'launch' 'tmux is older than 3.2 (new-session -e)'; return 0; fi
+
+  # A repo with no worktrees still means "make me one" — bare grove, no picker.
+  # rows() can never be empty now that the main checkout has a row, so that
+  # emptiness test asks the two worktree listings instead. This is what catches
+  # it if it ever goes back to counting rows.
+  g
+  if [ -d "$W1/wt1" ]; then ok 'no worktrees: bare grove makes one, never a picker'
+  else bad 'no worktrees: bare grove makes one, never a picker' "$ERR"; fi
+  ksess grove-r1-wt1
+  git -C "$R1" worktree remove --force "$W1/wt1" 2>/dev/null
+  git -C "$R1" branch -D grove/wt1 >/dev/null 2>&1
 
   g -n
   eq 'the first worktree branches grove/wt1' \

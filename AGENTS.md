@@ -23,6 +23,12 @@ optionally `fzf`.
   `worktree-<name>`), which grove must never treat as its own, and the branch test
   also keeps finding worktrees left over from the old `$GROVE_ROOT` layout. A
   grove worktree on a detached HEAD drops out of the listing; that's accepted.
+- **The main checkout is the one row that is not a worktree**, and opening it is
+  all grove does with it: `rows` emits it last (rank 6, below `unadopted`); every
+  other path already refuses it — `cmd_adopt`/`safe_remove` by path, `maybe_sync`
+  by branch, `-k` by name, now its slug (the repo dir's basename) is typeable.
+  `launch` withholds `GROVE_SLUG` there: in main it is a false and dangerous
+  claim — it is what marks a directory disposable. Picker-only; `docs/testing.md`.
 - **Adoption is that rename and nothing else** — `adopt_worktree` moves the branch
   to `grove/<slug>`, after which the worktree is ordinary and no other code path
   knows the difference. So it must **rename, never create**: a surviving

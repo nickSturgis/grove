@@ -35,6 +35,11 @@
 # The picker has two tabs, ←/→ between them: this repo's worktrees, and every
 # live grove session anywhere. Outside a git repo only the sessions tab exists.
 #
+# The worktrees tab lists the main checkout too, below every worktree: open it
+# to put a session in the repo itself, and kill that session like any other. It
+# is the one row grove only ever opens — never synced, never adopted, never
+# removed, and -k refuses it by name.
+#
 # Its kill key (ctrl-x, or x without fzf) ends a session and leaves the worktree.
 # Its remove key (ctrl-d, or d) takes the whole worktree away, but only one that
 # is clean and holds no commits of its own — nothing to lose, so it never asks.
@@ -421,7 +426,32 @@ rows() {
         "$c_bold" "$slug" "$c_rst" "$c_dim" 'unadopted' "$c_rst" \
         "$(describe "$p" "$base")" '-' "$p"
     done < <(foreign_worktrees)
+    # The main checkout: the one row that is not a worktree. Nothing else here
+    # changes for it — open_row and launch work off the path, and every
+    # destructive path already refuses it by name (cmd_adopt, safe_remove) or
+    # by branch (maybe_sync's grove/* guard). Its slug is the repo directory's
+    # basename, like every other row, so session_for names it without a special
+    # case. Rank 6 sinks it below even the unadopted rows, just above "+ new":
+    # it is always present and rarely what you came for. A session actually
+    # running in it floats back up on its own status, like anything else.
+    if [ -n "$main_root" ]; then
+      slug=$(basename "$main_root"); session=$(session_for "$slug")
+      IFS='|' read -r rank label <<<"$(status_of "$session")"
+      alive "$session" || rank=6
+      printf '%s\t%s%-10s%s  %s%-20s%s  %s\t%s\t%s\tworktrees\n' \
+        "$rank" "$c_bold" "$slug" "$c_rst" "$(rank_color "$rank")" "$label" "$c_rst" \
+        "$(describe "$main_root" "$base")$(upd_note "$session")" "$session" "$main_root"
+    fi
   } | sort -t$'\t' -k1,1n | cut -f2-
+}
+
+# The main checkout of whatever repo owns a path — resolved from the path, not
+# $main_root, because a sessions-tab row belongs to any repo, and grove runs
+# outside one. --git-common-dir can come back relative, hence the cd.
+main_root_of() {  # path -> that repo's main checkout, or ''
+  local c
+  c=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 0
+  ( cd "$1" && cd "$c" && dirname "$(pwd -P)" ) 2>/dev/null || true
 }
 
 # grove's sessions are named grove-<repo>-<slug>, so the name minus the path's
@@ -437,6 +467,9 @@ session_name_of() {  # session, path -> "repo/slug"
   else
     slug=${repo##*-}; repo=${repo%-*}
   fi
+  # A session in the main checkout has the repo's own name for a slug, which
+  # would read "grove/grove". Say what that row actually is instead.
+  if [ -n "$p" ] && [ "$p" = "$(main_root_of "$p")" ]; then slug=main; fi
   printf '%s/%s' "$repo" "$slug"
 }
 
@@ -635,8 +668,15 @@ launch() {
     # worktree, and where the main checkout is. The branch name is the weaker
     # fallback tell — it misses a detached HEAD. Only a session we create gets
     # them; an existing one is attached as it stands. tmux -e needs 3.2.
+    #
+    # The main checkout gets GROVE_MAIN_ROOT alone. GROVE_SLUG means "you are in
+    # a disposable worktree that grove -k retires" — in the repo itself that is
+    # both false and the dangerous direction to be wrong in, since it is exactly
+    # what tells an agent the directory is safe to throw away.
+    local -a envargs=(-e GROVE_MAIN_ROOT="$main_root")
+    [ "$path" = "$main_root" ] || envargs+=(-e GROVE_SLUG="$slug")
     tmux new-session -d -s "$session" -c "$path" \
-      -e GROVE_SLUG="$slug" -e GROVE_MAIN_ROOT="$main_root" "$(claude_cmd "$@")"
+      "${envargs[@]}" "$(claude_cmd "$@")"
     # A server still shutting down — exit-empty fires the moment its last session
     # dies — accepts new-session and then takes the session down with it. The
     # attach would race the corpse and the client would print a bare "[exited]",
@@ -809,6 +849,11 @@ cmd_kill() {
   done
   [ -n "$slug" ] || die "usage: grove -k <slug> [-f]"
   case "$slug" in */*|''|.|..) die "invalid slug: $slug" ;; esac
+  # The main checkout has a row and a session, so its slug is a name someone can
+  # reasonably type here. path_for_slug would miss it and say "no such worktree",
+  # which is safe but reads like grove lost it: say what is actually true.
+  [ "$slug" != "$(basename "$main_root")" ] \
+    || die "$slug is the main checkout — grove never removes it (x kills its session)"
   path=$(path_for_slug "$slug"); session=$(session_for "$slug")
   [ -n "$path" ] || die "no such worktree: $slug"
 
@@ -895,10 +940,13 @@ load_rows() {
 }
 
 # A repo with no worktrees at all still means "make me one" — the sessions tab
-# has nothing to say about a repo you have not started work in yet.
+# has nothing to say about a repo you have not started work in yet. The main
+# checkout's row is always there, so rows() can no longer be empty: ask the two
+# worktree listings themselves, which is what "no worktrees" meant all along.
 if [ "$in_repo" = 1 ]; then
+  [ -n "$(grove_worktrees; foreign_worktrees)" ] \
+    || { launch "$(new_worktree)" "$@"; exit 0; }
   mapfile -t ROWS < <(rows)
-  [ "${#ROWS[@]}" -eq 0 ] && { launch "$(new_worktree)" "$@"; exit 0; }
   ROWS+=("$(new_row)")
 else
   load_rows

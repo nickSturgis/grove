@@ -69,6 +69,18 @@ they are separate code paths and only one gets exercised on any given machine.
   frame. Watch the frame, not just the text: the note adds a line, so switching
   tabs afterwards has to leave no stranded rows.
 - `enter` on `+ new`, on a live session, on an unadopted row, on a `gone` row.
+- `enter` on the **main checkout's row** — the last one before `+ new`. No
+  script can reach this path, and it is the only one that starts a session
+  outside a worktree. It must come up as `grove-<repo>-<repo>` in the repo root
+  with `GROVE_MAIN_ROOT` set and **no** `GROVE_SLUG`, which is what stops an
+  agent reading the repo itself as a worktree `-k` may throw away:
+
+  ```bash
+  tmux show-environment -t =grove-<repo>-<repo> GROVE_SLUG   # expect: -GROVE_SLUG
+  ```
+
+  On that same row, `ctrl-x`/`x` ends the session like any other, and
+  `ctrl-d`/`d` must refuse with `is the main checkout`.
 - Redirect stderr, or `TERM=dumb`, for the numbered fallback.
 
 Force the rows worth looking at by hand: `tmux set-option -t <session>
