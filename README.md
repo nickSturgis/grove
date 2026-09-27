@@ -9,7 +9,7 @@ A grove is a stand of trees — here, the set of worktrees you have Claude
 working in. Plant one per task, survey them, cut them down when merged.
 
 ```
-grove             pick a worktree, or make one if the repo has none
+grove             pick a worktree, or the main checkout; inside a worktree, open it
 grove -n          always make a fresh worktree
 grove -l          list this repo's worktrees and their state
 grove -k <slug>   kill the session and remove the worktree

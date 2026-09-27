@@ -2,7 +2,7 @@
 # grove — launch Claude Code in an isolated git worktree, inside a tmux session
 #      that outlives your terminal.
 #
-#   grove             pick a worktree, or make one if the repo has none
+#   grove             pick a worktree, or the main checkout; inside a worktree, open it
 #   grove -n          always make a fresh worktree
 #   grove -l          list this repo's worktrees and their state
 #   grove -s          list every live grove session, in any repo
@@ -939,18 +939,13 @@ load_rows() {
   fi
 }
 
-# A repo with no worktrees at all still means "make me one" — the sessions tab
-# has nothing to say about a repo you have not started work in yet. The main
-# checkout's row is always there, so rows() can no longer be empty: ask the two
-# worktree listings themselves, which is what "no worktrees" meant all along.
-if [ "$in_repo" = 1 ]; then
-  [ -n "$(grove_worktrees; foreign_worktrees)" ] \
-    || { launch "$(new_worktree)" "$@"; exit 0; }
-  mapfile -t ROWS < <(rows)
-  ROWS+=("$(new_row)")
-else
-  load_rows
-  [ "${#ROWS[@]}" -eq 0 ] && { printf 'grove: no live grove sessions\n' >&2; exit 0; }
+# Inside a repo the picker always opens, even with no worktrees at all: the
+# main checkout's row and "+ new" are both there, and which one you want is
+# yours to say — making a worktree unasked leaves main out of reach. Only the
+# sessions tab, outside a repo, can come up empty.
+load_rows
+if [ "$in_repo" = 0 ] && [ "${#ROWS[@]}" -eq 0 ]; then
+  printf 'grove: no live grove sessions\n' >&2; exit 0
 fi
 
 # --- picker ------------------------------------------------------------------

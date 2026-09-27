@@ -676,13 +676,14 @@ t_launch() {
   CWD=$R1
   if [ "$HAVE_E" = 0 ]; then skip 'launch' 'tmux is older than 3.2 (new-session -e)'; return 0; fi
 
-  # A repo with no worktrees still means "make me one" — bare grove, no picker.
-  # rows() can never be empty now that the main checkout has a row, so that
-  # emptiness test asks the two worktree listings instead. This is what catches
-  # it if it ever goes back to counting rows.
+  # A repo with no worktrees still gets the picker, never a worktree made
+  # unasked: the main checkout's row is one of its choices. No tty here, so the
+  # picker has nobody to ask and quits — what matters is that nothing was made.
   g
-  if [ -d "$W1/wt1" ]; then ok 'no worktrees: bare grove makes one, never a picker'
-  else bad 'no worktrees: bare grove makes one, never a picker' "$ERR"; fi
+  if [ ! -e "$W1/wt1" ]; then ok 'no worktrees: bare grove opens the picker, makes none'
+  else bad 'no worktrees: bare grove opens the picker, makes none' "$ERR"; fi
+  eq '…and no grove/* branch either' \
+     "$(git -C "$R1" branch --list --format='%(refname:short)' 'grove/*')" ''
   ksess grove-r1-wt1
   git -C "$R1" worktree remove --force "$W1/wt1" 2>/dev/null
   git -C "$R1" branch -D grove/wt1 >/dev/null 2>&1
@@ -697,6 +698,12 @@ t_launch() {
   eq 'and git never sees it' "$(git -C "$R1" status --porcelain)" ''
   has 'info/exclude keeps it out of the way' \
       "$(cat "$R1/.git/info/exclude")" '**/.claude/worktrees/'
+  ksess grove-r1-wt1
+
+  # Standing in a worktree skips the picker and opens that worktree's session.
+  CWD=$W1/wt1; g; CWD=$R1
+  if sess_alive grove-r1-wt1; then ok 'inside a worktree: bare grove opens it, no picker'
+  else bad 'inside a worktree: bare grove opens it, no picker' "$ERR"; fi
   ksess grove-r1-wt1
 
   git -C "$R1" branch grove/wt2
