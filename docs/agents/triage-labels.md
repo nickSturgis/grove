@@ -12,4 +12,19 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
-Edit the right-hand column to match whatever vocabulary you actually use.
+## Gitea label IDs
+
+Only `watch` is recorded here. Resolve any other label's ID as
+`docs/agents/issue-tracker.md#labels-are-ids-not-names` says.
+
+| Name              | ID |
+| ----------------- | -- |
+| `watch`           | 46 (org) |
+
+## Outside triage: `watch`
+
+`watch` is not a triage role, and triage never assigns it, but it **fills the
+state slot**: an issue carries one of the roles above *or* `watch`, never both,
+and a Watch is not untriaged. It is an org label, so its ID is the same in every
+glowlab repo. The rules are the `watch` skill's, section *The label, and
+landing*.

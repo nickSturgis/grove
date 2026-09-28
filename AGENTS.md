@@ -113,7 +113,6 @@ What no script can reach — the two pickers, `attach`, the stale-claude restart
 and the rules for isolating and tearing down the test's tmux server, are in
 `docs/testing.md`.
 
-
 ## Keeping these files navigable
 
 An `AGENTS.md` orients and routes. It is **not** where a subsystem's reasoning accumulates — that's
@@ -135,7 +134,9 @@ method for doing that — and for auditing the whole trail — is the `breadcrum
 
 Config the `mattpocock-skills` engineering skills read:
 
-- **Issue tracker** — Gitea, via `mcp__gitea__*`: `docs/agents/issue-tracker.md`
+- **Issue tracker** — Gitea, via `mcp__gitea__*`: `docs/agents/issue-tracker.md`.
+  **Landing includes the issue state**: close the issue, put it on `watch`, or move it to
+  `ready-for-human`, in the same session. See `docs/agents/issue-tracker.md#watches`.
 - **Triage labels** — five canonical roles, label string = role name:
   `docs/agents/triage-labels.md`
 - **Domain docs** — single-context, `CONTEXT.md` + `docs/adr/`: `docs/agents/domain.md`

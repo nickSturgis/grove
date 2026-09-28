@@ -29,6 +29,18 @@ Cite issues inline as `Gitea **#N**`.
 
 Removal is one label at a time: `method: "remove_label"` + `label_id`.
 
+## Watches
+
+The `watch` skill is canonical. Landing a fix ends in closed, `watch` or
+`ready-for-human` (its section *The label, and landing*).
+
+- **Find Watches the skill's way.** A per-repo `list_issues` silently ignores
+  the org `watch` label and returns every open issue.
+- **`ready-for-agent` is not the whole to-do list.** Watches and
+  `ready-for-human` are deliberately off it.
+- **Probes live in `watch-probes/`** at the repo root. grove's own `tests/run`
+  proves most fixes, so they close when they land.
+
 ## PRs as a request surface
 
 **No.** _(Set to `yes` if external PRs should enter the triage queue; `/triage` reads
