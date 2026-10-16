@@ -321,19 +321,35 @@ session_at() {  # path -> another tmux session already sitting in it, or ''
 # refs/heads/grove/<slug>, and a mismatch is that silent -k again.
 # Cheap and reversible, which is what makes opening a row enough to trigger it.
 adopt_worktree() {
-  local p="$1" slug old busy
+  local p="$1" slug old busy stale
   slug=$(basename "$p")
   old=$(git -C "$p" symbolic-ref --short -q HEAD) \
     || die "$slug is on a detached HEAD — no branch to rename"
   case "$old" in grove/*) return 0 ;; esac
+  # A taken grove/<slug> is usually this very worktree's old name: a session in
+  # a grove worktree ran `checkout -b`, and the worktree turned foreign under
+  # it. If that branch is an ancestor of HEAD, every commit it holds is also on
+  # $old, so it can go — deleting it loses nothing, and the rename that follows
+  # still leaves exactly one name on those commits. Diverged, it holds work of
+  # its own, and that is the owner's to sort out.
+  stale=''
   if git -C "$main_root" show-ref --verify --quiet "refs/heads/grove/$slug"; then
-    die "branch grove/$slug already exists — rename it before adopting $slug"
+    git -C "$p" merge-base --is-ancestor "refs/heads/grove/$slug" HEAD \
+      || die "branch grove/$slug already exists and has commits $old lacks — rename it before adopting $slug"
+    stale=1
   fi
   # A foreign worktree has no grove session to ask, so this is the only liveness
   # signal there is: it catches `claude --tmux -w`, and misses a foreground
   # `claude -w`, which leaves no trace anywhere.
   busy=$(session_at "$p")
   [ -n "$busy" ] && die "session $busy is already sitting in $slug"
+  # -D, because -d judges against the main checkout's HEAD; the ancestry test
+  # above is the check. Fails, and stops here, if another worktree has it out.
+  if [ -n "$stale" ]; then
+    git -C "$main_root" branch -D -q "grove/$slug" \
+      || die "could not drop the old grove/$slug"
+    printf 'grove: dropped grove/%s — %s already holds all of it\n' "$slug" "$old" >&2
+  fi
   git -C "$main_root" branch -m "$old" "grove/$slug" \
     || die "could not rename $old to grove/$slug"
   printf 'grove: adopted %s — %s is now grove/%s\n' "$slug" "$old" "$slug" >&2

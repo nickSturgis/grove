@@ -451,10 +451,11 @@ t_adopt() {
   same 'adopt <detached>' "$R1" "$before"
 
   git -C "$W1/wt8" checkout -q -B worktree-wt8
-  git -C "$R1" branch grove/wt8
+  git -C "$R1" branch grove/wt8 \
+    "$(git -C "$R1" commit-tree -p HEAD -m 'its own work' 'HEAD^{tree}')"
   before=$(snap "$R1")
   g adopt wt8
-  has  'refuses when grove/<slug> is taken' "$ERR" 'already exists'
+  has  'refuses when grove/<slug> is taken and diverged' "$ERR" 'already exists'
   same 'adopt <branch taken>' "$R1" "$before"
   git -C "$R1" branch -D grove/wt8 >/dev/null
 
@@ -464,6 +465,21 @@ t_adopt() {
   has  'refuses a worktree another session is sitting in' "$ERR" 'already sitting in'
   same 'adopt <busy>' "$R1" "$before"
   ksess other-tool
+
+  # The lockout this exists for: a grove worktree whose session ran
+  # `checkout -b` and committed, leaving grove/<slug> behind as an ancestor.
+  fwt "$R1" wt7
+  git -C "$W1/wt7" branch -m worktree-wt7 grove/wt7
+  git -C "$W1/wt7" checkout -q -b fix/thing
+  git -C "$W1/wt7" commit -q --allow-empty -m 'work on the new branch'
+  g -l; has 'a grove worktree that branched off lists as unadopted' "$OUT" 'unadopted'
+  g adopt wt7
+  rcis 'adopt over a stale grove/<slug>: exit 0' 0
+  has 'says it dropped the stale branch' "$ERR" 'dropped grove/wt7'
+  eq  'the new branch is now grove/<slug>' \
+      "$(git -C "$W1/wt7" log -1 --format=%s grove/wt7)" 'work on the new branch'
+  if git -C "$R1" show-ref --verify --quiet refs/heads/fix/thing
+  then bad 'and the old name is gone'; else ok 'and the old name is gone'; fi
 
   mkdir -p "$W1/wt8/sub"
   g adopt "$W1/wt8/sub"
