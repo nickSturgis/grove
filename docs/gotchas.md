@@ -34,3 +34,11 @@ way it does; `AGENTS.md` routes here rather than carrying them.
   to coexist with typing needs a modifier: the remove key is `ctrl-d` there and
   plain `d` only in the cursor picker, which has no query. `ctrl-d` costs
   half-page-down, which a one-row-per-worktree list never needed.
+- Under `set -o pipefail`, `git … | grep -q x` is a race: grep exits on its first
+  match, git dies of SIGPIPE, and the pipeline reports *failure* even though it
+  matched. `! git cherry … | grep -q '^+'` therefore reads "nothing unlanded" at
+  random, which is the direction that deletes work. Capture the output into a
+  variable first, then test it with `case`. The same goes for `| head -1`.
+- `git patch-id` hashes the file names in the `diff --git a/x b/x` header, and
+  `log -p -R` swaps them to `b/x a/x`. A reversed diff from `-R` therefore never
+  matches the real revert commit. Build an inverse with `git diff <c> <c>^`.

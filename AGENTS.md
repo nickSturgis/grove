@@ -85,33 +85,33 @@ optionally `fzf`.
   any name that isn't `grove-*` and refuses the session it is running in.
 - The **remove** key (`safe_remove`) needs none for the opposite reason: it acts
   only where there is provably nothing to lose — `grove/*` branch, clean tree,
-  no commits of its own, no live lock — and refuses everything else by name,
-  pointing at `-k`, the one that prompts. So it must never grow a force flag or
-  a prompt of its own, and never read `$main_root`: rows span repos, so `$root`
-  comes from the row's path (hence `lock_reason` is `-C` that path too).
+  no commits main lacks the content of (`landed`), no live lock — and refuses
+  everything else by name, pointing at `-k`, the one that prompts. So it must
+  never grow a force flag or a prompt of its own, and never read `$main_root`:
+  rows span repos, so `$root` comes from the row's path (hence `lock_reason` is
+  `-C` that path too).
   fzf never sees its stderr; the outcome rides `$GROVE_NOTE` onto the header
   line, so **every** reload binding must pass that variable, not just this key's.
+- The **sweep** (`grove sweep`, `ctrl-s`/`s`) is the remove key over every unused
+  `grove/*`/`worktree-*` worktree and bare branch. It **never pushes**, and
+  `landed` must fail safe. Its rules are in the comment above `run_sweep`.
 
 ## Gotchas found the hard way
 
-Ten of them, in `docs/gotchas.md` — fzf's quoting and version floor, tmux
+Twelve of them, in `docs/gotchas.md` — fzf's quoting and version floor, tmux
 target forms, `rev-list --exclude` scope, ANSI-vs-`printf` width, the
-`exit-empty` race. **Read it before editing `grove`**, and add to it rather than
-here when the next one turns up.
+`exit-empty` race, `pipefail` vs `grep -q`. **Read it before editing `grove`**,
+and add to it rather than here when the next one turns up.
 
 ## Testing
 
-`tests/run` is the scriptable half — every entrypoint that is argv in, text and
-git state out: rows, adopt, `--_remove`, `-k`, the lock states, the
-fast-forward, `--state`. It builds its own scratch repos and its own tmux
-server, takes seconds, and cleans up after itself. Run it before you touch
+`tests/run` is the scriptable half — every argv-in, text-and-git-state-out
+entrypoint; `tests/run -l` lists its groups. It builds its own scratch repos and
+tmux server, takes seconds, and cleans up after itself. Run it before you touch
 `grove`, and grow it with the code: a new refusal, row marker or entrypoint
 belongs in it. It is the only other executable in the repo; the one-file rule
-above is about `grove`.
-
-What no script can reach — the two pickers, `attach`, the stale-claude restart —
-and the rules for isolating and tearing down the test's tmux server, are in
-`docs/testing.md`.
+above is about `grove`. What no script can reach — the pickers, `attach`, the
+stale-claude restart — and isolating the test's tmux server: `docs/testing.md`.
 
 ## Keeping these files navigable
 

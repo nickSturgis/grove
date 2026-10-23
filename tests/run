@@ -144,6 +144,9 @@ snap()  { git -C "$1" worktree list --porcelain | grep '^worktree '
           git -C "$1" for-each-ref --format='%(refname)' refs/heads; }
 same()  { eq "$1 — repo untouched" "$(snap "$2")" "$3"; }
 
+cmt()   { printf '%s\n' "$2" > "$1/$2"; git -C "$1" add "$2"; git -C "$1" commit -qm "$2"; }
+refs()  { git -C "$1" for-each-ref --format='%(refname)'; }
+
 proc_start() { awk '{ sub(/^[0-9]+ \(.*\) /, ""); print $20 }' "/proc/$1/stat" 2>/dev/null; }
 lock()       { git -C "$1" worktree lock --reason "$3" "$2"; }
 
@@ -572,7 +575,19 @@ t_remove() {
   g --_remove "$W1/wt8" -
   has 'removes a worktree of another repo entirely' "$ERR" 'removed wt8'
 
+  # Landed by content, not by id: a cherry-pick leaves the original commit on
+  # no other ref, which orphan_count alone read as work of its own.
   CWD=$HOME
+  wt "$R1" wtc; cmt "$W1/wtc" c
+  git -C "$R1" commit -q --allow-empty -m 'main moves on'
+  git -C "$R1" cherry-pick grove/wtc >/dev/null
+  g --_remove "$W1/wtc" -
+  has 'a cherry-picked worktree is nothing to lose' "$ERR" 'removed wtc (cherry-picked)'
+  wt "$R1" wtd; cmt "$W1/wtd" d
+  g --_remove "$W1/wtd" -
+  has 'an unlanded commit still refuses' "$ERR" "commit(s) of its own"
+  git -C "$R1" worktree remove --force "$W1/wtd"; git -C "$R1" branch -qD grove/wtd
+
   wt "$R1" wt9
   printf 'stale' > "$SB/note"
   g "GROVE_NOTE=$SB/note" --_remove "$W1/wt9" -
@@ -581,6 +596,145 @@ t_remove() {
 
   wipe_sessions
   reset_repo "$R1" "$BASE1"; reset_repo "$R2" "$BASE2"
+}
+
+t_sweep() {
+  group 'sweep: retire everything whose work has landed'
+  local O=$SB/origin.git R=$SB/rs W before
+  W=$R/.claude/worktrees
+  rm -rf "$O" "$R" "$SB/other"; wipe_sessions
+  git init -q --bare "$O"
+  git clone -q "$O" "$R" 2>/dev/null
+  git -C "$R" config user.name grove-test; git -C "$R" config user.email grove-test@localhost
+  git -C "$R" config commit.gpgsign false
+  seq 1 20 > "$R/f"; git -C "$R" add f; git -C "$R" commit -qm init
+  git -C "$R" branch -M main; git -C "$R" push -qu origin main
+  CWD=$R
+
+  # Every way work reaches main. Main moves first each time, so a cherry-pick
+  # can never reproduce the very same commit and pass as an ancestor.
+  wt "$R" merged; cmt "$W/merged" a
+  git -C "$R" merge -q --no-ff grove/merged -m merge
+  wt "$R" picked; cmt "$W/picked" b
+  git -C "$R" commit -q --allow-empty -m 'main moves on'
+  git -C "$R" cherry-pick grove/picked >/dev/null
+  wt "$R" squashed; cmt "$W/squashed" c; cmt "$W/squashed" c2
+  git -C "$R" merge -q --squash grove/squashed >/dev/null; git -C "$R" commit -qm squash
+  # Squashed, then main rewrote the same line: merge-tree conflicts here, and
+  # only the patch-id of the squash commit can still say it landed.
+  wt "$R" edited
+  sed -i 3s/.*/X/ "$W/edited/f"; git -C "$W/edited" commit -qam x
+  sed -i 5s/.*/Y/ "$W/edited/f"; git -C "$W/edited" commit -qam y
+  git -C "$R" merge -q --squash grove/edited >/dev/null; git -C "$R" commit -qm squash2
+  sed -i 3s/.*/Z/ "$R/f"; git -C "$R" commit -qam later
+  # Part cherry-picked, part squashed with something else: only "in main" sees it.
+  wt "$R" mixed; cmt "$W/mixed" m1; cmt "$W/mixed" m2
+  git -C "$R" cherry-pick grove/mixed~1 >/dev/null
+  printf 'm2\n' > "$R/m2"; printf 'q\n' > "$R/q"; git -C "$R" add m2 q; git -C "$R" commit -qm 'm2 and q'
+  fwt "$R" claude; cmt "$W/claude" e
+  git -C "$R" commit -q --allow-empty -m 'main moves on'
+  git -C "$R" cherry-pick worktree-claude >/dev/null
+  git -C "$R" branch grove/orphan
+  git -C "$R" branch feature
+  # What must stay.
+  wt "$R" open;     cmt "$W/open" o
+  fwt "$R" theirs;  cmt "$W/theirs" t
+  wt "$R" dirty;    : > "$W/dirty/scratch"
+  wt "$R" live;     mksess grove-rs-live "$W/live"
+  wt "$R" squatted; mksess squatter "$W/squatted"
+  wt "$R" reverted; cmt "$W/reverted" r
+  git -C "$R" merge -q --squash grove/reverted >/dev/null; git -C "$R" commit -qm rv
+  git -C "$R" revert --no-edit HEAD >/dev/null
+  wt "$R" unpicked; cmt "$W/unpicked" p1; cmt "$W/unpicked" p2
+  git -C "$R" commit -q --allow-empty -m 'main moves on'
+  git -C "$R" cherry-pick grove/unpicked~1 grove/unpicked >/dev/null
+  git -C "$R" revert --no-edit HEAD~1 >/dev/null
+  # A squash that reverts is content-equal to main but is still a commit someone made.
+  wt "$R" noop; cmt "$W/noop" n; git -C "$W/noop" rm -q n; git -C "$W/noop" commit -qm unn
+  git -C "$R" branch grove/unlanded grove/open
+  if [ -d /proc ]; then
+    wt "$R" livelock; lock "$R" "$W/livelock" "claude session x (pid $$ start $(proc_start $$))"
+    wt "$R" stalelock; lock "$R" "$W/stalelock" "claude session y (pid 999999 start 1)"
+  fi
+  # Landed on the server only: another clone merges it and deletes the branch.
+  wt "$R" upstream; cmt "$W/upstream" u
+  git -C "$W/upstream" push -q origin HEAD:refs/heads/grove/upstream 2>/dev/null
+  git clone -q -b main "$O" "$SB/other" 2>/dev/null
+  git -C "$SB/other" -c user.name=o -c user.email=o@o merge -q --no-ff origin/grove/upstream -m land
+  git -C "$SB/other" push -q origin main 2>/dev/null
+  git -C "$SB/other" push -q origin --delete grove/upstream 2>/dev/null
+
+  before=$(snap "$R"; refs "$R")
+  g sweep -n
+  rcis 'a dry run exits 0' 0
+  has  'a dry run says what it would take' "$ERR" 'would remove merged (merged)'
+  eq   'and changes nothing — no ref, worktree or tracking ref' "$(snap "$R"; refs "$R")" "$before"
+
+  g sweep
+  [ "$VERBOSE" = 1 ] && printf '%s\n' "$ERR" | sed 's/^/        /'
+  rcis 'sweep exits 0' 0
+  has 'merged → removed'               "$ERR" 'removed merged (merged)'
+  has 'cherry-picked → removed'        "$ERR" 'removed picked (cherry-picked)'
+  has 'squashed → removed'             "$ERR" 'removed squashed (squashed)'
+  has 'squashed then edited → removed' "$ERR" 'removed edited (squashed)'
+  has 'mixed → removed'                "$ERR" 'removed mixed (in main)'
+  has 'a landed worktree-* → removed'  "$ERR" 'removed claude (cherry-picked)'
+  has 'a landed bare branch → deleted' "$ERR" 'deleted branch grove/orphan'
+  has 'landed on origin only → removed' "$ERR" 'removed upstream (merged)'
+  has 'a branch gone from the server is pruned' "$ERR" 'pruned 1 remote-tracking ref'
+  has 'an unlanded commit stays'       "$ERR" 'kept open — 1 commit(s) not in main'
+  has 'an unlanded worktree-* stays'   "$ERR" 'kept theirs'
+  has 'a dirty one stays'              "$ERR" 'kept dirty — has 1 uncommitted'
+  has 'a live session keeps it'        "$ERR" 'kept live — its session is live'
+  has 'any session sitting in it keeps it' "$ERR" 'kept squatted — session squatter'
+  has 'reverted in main stays'         "$ERR" 'kept reverted'
+  has 'a cherry-pick main reverted stays' "$ERR" 'kept unpicked'
+  has 'a net-empty diff stays'         "$ERR" 'kept noop'
+  has 'an unlanded bare branch stays'  "$ERR" 'kept branch grove/unlanded'
+  hasnt 'a hand-made branch is out of scope' "$ERR" 'feature'
+  local left; left=$(refs "$R")
+  for b in open dirty live squatted reverted unpicked noop unlanded; do
+    has "grove/$b survives" "$left" "refs/heads/grove/$b"
+  done
+  has 'worktree-theirs survives' "$left" 'refs/heads/worktree-theirs'
+  has 'feature survives'         "$left" 'refs/heads/feature'
+  has 'main survives'            "$left" 'refs/heads/main'
+  for b in merged picked squashed edited mixed orphan upstream; do
+    hasnt "grove/$b is gone" "$left" "refs/heads/grove/$b"
+  done
+  hasnt 'origin/grove/upstream is pruned' "$left" 'refs/remotes/origin/grove/upstream'
+  if [ -d "$W/merged" ]; then bad 'the directories go too'; else ok 'the directories go too'; fi
+  if sess_alive grove-rs-live; then ok 'the live session was not killed'
+  else bad 'the live session was not killed'; fi
+  if [ -d /proc ]; then
+    has 'a live lock keeps it'     "$ERR" 'kept livelock — is locked by a running process'
+    has 'a stale lock clears'      "$ERR" 'removed stalelock (merged)'
+  fi
+  eq 'it never pushed: the server still has no grove branch' \
+     "$(git -C "$O" for-each-ref --format='%(refname)' refs/heads/grove)" ''
+
+  # The picker's half: the summary goes to the note, nothing to stderr.
+  ksess grove-rs-live
+  printf 'stale' > "$SB/note"
+  g "GROVE_NOTE=$SB/note" --_sweep
+  eq  'with $GROVE_NOTE set, nothing goes to stderr' "$ERR" ''
+  has 'the summary lands in the note' "$(cat "$SB/note")" 'swept live'
+  has 'and counts what it kept'       "$(cat "$SB/note")" 'kept'
+  g "GROVE_NOTE=$SB/note" --_rows worktrees
+  has 'the next reload shows it on the tab bar' "$(line1 "$OUT")" 'swept live'
+
+  # An unreachable remote is a note, not a failure.
+  git -C "$R" remote set-url origin "$SB/nowhere.git"
+  g sweep
+  rcis 'an unreachable remote still exits 0' 0
+  has  'and says it judged locally' "$ERR" "couldn't fetch origin"
+
+  CWD=$HOME
+  g sweep
+  has 'outside a repo it refuses' "$ERR" 'not inside a git repository'
+
+  wipe_sessions
+  rm -rf "$O" "$R" "$SB/other"
 }
 
 t_kill() {
@@ -803,7 +957,7 @@ t_launch() {
 }
 
 # =============================================================================
-ALL='state help rows markers killkey adopt remove kill launch'
+ALL='state help rows markers killkey adopt remove sweep kill launch'
 
 usage() { printf 'usage: tests/run [-v] [-l] [group...]\n  groups: %s\n' "$ALL"; }
 

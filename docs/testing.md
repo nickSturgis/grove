@@ -68,6 +68,10 @@ they are separate code paths and only one gets exercised on any given machine.
   outcome rides fzf's header line via `$GROVE_NOTE` and the plain picker's own
   frame. Watch the frame, not just the text: the note adds a line, so switching
   tabs afterwards has to leave no stranded rows.
+- `ctrl-s`/`s` sweeps: the summary (`swept … · kept n`) lands on the same line
+  as the remove key's note, and the reload stays on the tab you were on.
+  `tests/run sweep` covers what it decides. Only the key binding and the frame
+  are left to check by hand, and fzf's `ctrl-s` must be checked on 0.38.
 - `enter` on `+ new`, on a live session, on an unadopted row, on a `gone` row.
 - `enter` on the **main checkout's row** — the last one before `+ new`. No
   script can reach this path, and it is the only one that starts a session
