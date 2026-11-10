@@ -147,5 +147,5 @@ Config the `mattpocock-skills` engineering skills read:
   `docs/agents/issue-tracker.md`; never restated here.
 - **The workflow that lands this repo's work** — branching, committing, merging
   to `main` — is the `git-workflow@glow` skill
-  (`~/glow-marketplace/plugins/git-workflow/skills/git-workflow/SKILL.md`).
+  (`~/glow-skills/plugins/git-workflow/skills/git-workflow/SKILL.md`).
   Canonical there; never restated here. 
